@@ -59,7 +59,7 @@ afterEach(() => {
 
 // Exercise the real SDK adapter with deterministic, stubbed transport.
 describe.skipIf(!hasNativeClassifier)("routing through Pi's native SDK", () => {
-  it("routes through the OpenAI Decisions adapter using Luna", async () => {
+  it.each([false, true])("routes Luna (force=%s)", async (forceJev) => {
     fetch.mockResolvedValueOnce(
       Response.json({
         answers: [
@@ -80,8 +80,9 @@ describe.skipIf(!hasNativeClassifier)("routing through Pi's native SDK", () => {
     );
     const onUsage = vi.fn();
     const engine = createRoutingEngine({
+      forceJev,
       env: {
-        ...env,
+        ...(forceJev ? {} : env),
         PI_ORCHESTRATOR_ROUTER_PROVIDER: "openai",
         PI_ORCHESTRATOR_ROUTER_MODEL: "gpt-6-luna",
       },
@@ -122,19 +123,25 @@ describe.skipIf(!hasNativeClassifier)("routing through Pi's native SDK", () => {
   });
 
   it.each([
-    ["openrouter", "~typesafe/jev-latest"],
-    ["typesafe", "jev-latest"],
+    { provider: "openrouter", model: "~typesafe/jev-latest", forceJev: false },
+    { provider: "typesafe", model: "jev-latest", forceJev: false },
+    { provider: "openrouter", model: "~typesafe/jev-latest", forceJev: true },
+    { provider: "typesafe", model: "jev-latest", forceJev: true },
   ])(
-    "uses the real %s catalog, auth, wire adapter and result parser",
-    async (provider, model) => {
+    "uses the real $provider catalog, auth, wire adapter and result parser (force=$forceJev)",
+    async ({ provider, model, forceJev }) => {
       fetch.mockResolvedValueOnce(Response.json(wireResponse));
       const onUsage = vi.fn();
       const engine = createRoutingEngine({
-        env: {
-          ...env,
-          PI_ORCHESTRATOR_ROUTER_PROVIDER: provider,
-          PI_ORCHESTRATOR_ROUTER_MODEL: model,
-        },
+        forceJev,
+        env:
+          forceJev && provider === "openrouter"
+            ? {}
+            : {
+                ...(forceJev ? {} : env),
+                PI_ORCHESTRATOR_ROUTER_PROVIDER: provider,
+                PI_ORCHESTRATOR_ROUTER_MODEL: model,
+              },
         modelRegistry: registry,
         onUsage,
       });

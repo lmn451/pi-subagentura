@@ -1,9 +1,10 @@
 ---
-title: "Optional native classifier routing"
+title: "Native classifier routing"
 keywords:
   [
     orchestratorv2,
     jev,
+    force-jev,
     openai-decisions,
     classifier,
     routing,
@@ -12,11 +13,10 @@ keywords:
   ]
 ---
 
-# Optional native classifier routing
+# Native classifier routing
 
-Orchestratorv2 can ask a Pi classifier to recommend one existing, live,
-authorized native interactive child when the requested work is clear but its
-owner is ambiguous. The extension builds eligible candidates from the current
+Orchestratorv2 can ask a Pi classifier to advise on the owner of a clear task.
+The extension builds eligible native interactive candidates from the current
 parent session's routing authority and live runtime, then calls Pi's native
 classifier API. The classifier chooses only among those candidates (or `none`);
 it cannot create, message, attach to, or change a child's responsibilities.
@@ -30,7 +30,40 @@ owner. Rex is a native mux backend, so a Rex child may be recommended only when
 it is already an eligible, live, authorized native child. Orca host-managed
 agents are outside this registry and cannot be selected by the advisor.
 
-## Enable
+## Require classifier advice for implicit native routing
+
+```bash
+pi --orchestratorv2 --force-jev
+```
+
+`--force-jev` applies only to parent Orchestratorv2 sessions. It does not
+require `PI_ORCHESTRATOR_ROUTER=jev` or override the existing provider, model,
+thresholds, or limits. An unset provider defaults to `openrouter`; an unset
+model defaults to `~typesafe/jev-latest`. These defaults are independent, and
+invalid overrides do not fall back to them. The selected pair must be an
+authenticated Pi classifier that supports the typed choice request. Compatible
+non-Jev classifiers are supported. The flag does not select a parent or worker
+chat model.
+
+List current native owners first. For a clear implicit owner decision, use
+`resolve_orchestrator_route` before reusing or creating a child, even when
+there is only one eligible child. A complete registry with no eligible children
+needs no classifier call. Explicit child targets, explicit new-child requests,
+attach/focus, unclear requests, and host-managed routing follow existing policy.
+
+If the configured classifier cannot provide a decision, the router must not
+guess or use another classifier. The advisor remains registered in forced mode
+and returns `unavailable` when candidates exist but the configuration or
+classifier is unavailable. Abstention does not establish owner absence or
+grant permission to spawn.
+
+At runtime the advisor uses only the configured classifier and validates the
+decision. The requirement to call the advisor, and the bypass rules for explicit
+requests, are **prompt policy**, not a runtime gate on send or spawn. The advisor
+classifies the task text supplied by the parent model and does not verify it
+against the original user text.
+
+## Enable optional advice without the flag
 
 Routing requires Pi **1.2.0 or newer**, a catalog classifier with configured
 provider authentication, and both explicit opt-ins:
@@ -94,7 +127,7 @@ Restart Pi after changing environment configuration. Unset
 does not enable routing. Project settings cannot enable it or alter thresholds;
 legacy `--orchestrator` behavior is unchanged.
 
-Enabling this feature opts into sending the bounded payload below to the
+Enabling either mode opts into sending the bounded payload below to the
 configured classifier provider. There is no additional confirmation dialog.
 
 Optional settings are read only from the process environment:
@@ -123,6 +156,9 @@ call. Registry liveness checks can add time before and after it. Thresholds are
 conservative defaults, not measured accuracy guarantees.
 
 ## Parent flow and authority
+
+This flow describes optional advice. With `--force-jev`, use the required
+advice and error rules above instead of direct implicit reuse or fallback.
 
 1. Call `list_orchestrator_agents` and inspect current authoritative
    responsibilities and runtimes before deciding whether to reuse or create a

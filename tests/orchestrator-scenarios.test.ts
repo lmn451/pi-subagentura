@@ -66,6 +66,10 @@ import {
   sessionOwner,
   type SessionScope,
 } from "../src/session-scope";
+import {
+  classifierResult,
+  nativeClassifierRegistry,
+} from "./helpers/native-classifier";
 
 const CHILD_A = "0123456789abcdef";
 const CHILD_B = "fedcba9876543210";
@@ -278,6 +282,7 @@ afterEach(() => {
     rmSync(root, { recursive: true, force: true });
   }
   resetRuntimeChildArtifactOwnershipForTests();
+  vi.unstubAllEnvs();
 });
 
 afterAll(() => {
@@ -527,6 +532,137 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(toolNames).not.toContain("resolve_orchestrator_route");
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
+  });
+
+  it("requires advice for implicit ownership with one or two children, not zero", async () => {
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER", undefined);
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER_PROVIDER", "openai");
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER_MODEL", "gpt-6-luna");
+    const environment = setupScenario(true);
+    const { api, ctx } = environment;
+    const modelRegistry = nativeClassifierRegistry();
+    const model = {
+      ...modelRegistry.model,
+      provider: "openai",
+      id: "gpt-6-luna",
+      api: "openai-decisions",
+    };
+    modelRegistry.findOfType.mockReturnValue(model);
+    modelRegistry.getProviderAuthStatus.mockReturnValue({ configured: false });
+    api.getFlag.mockImplementation((name) =>
+      ["orchestratorv2", "force-jev"].includes(name),
+    );
+    const toolCtx = { ...ctx, modelRegistry };
+    const prompt = { systemPrompt: "base prompt" };
+    expect(api.registerFlag).toHaveBeenCalledWith(
+      "force-jev",
+      expect.objectContaining({ type: "boolean", default: false }),
+    );
+    const [injectPrompt, ...startHandlers] = api.on.mock.calls
+      .filter(([event]) => event === "before_agent_start")
+      .map(([, handler]) => handler);
+    const { systemPrompt } = injectPrompt(prompt, toolCtx);
+    expect(systemPrompt).toContain("## Required native routing advice");
+    expect(systemPrompt).toContain("even when exactly one child is eligible");
+    expect(systemPrompt).toContain("do not fall back to prompt-only routing");
+    expect(systemPrompt).toContain(
+      "Explicit child identity, explicit new-child instructions, and attach/focus",
+    );
+    expect(systemPrompt).not.toContain("## Optional routing advisor");
+    for (const handler of startHandlers) await handler(prompt, toolCtx);
+    const route = () =>
+      executeTool(
+        registeredTool(api, "resolve_orchestrator_route"),
+        { task: "Continue API migration" },
+        toolCtx,
+      );
+    expect((await route()).details.decision).toEqual({
+      kind: "no_match",
+      reason: "new_child_recommended",
+    });
+    expect(modelRegistry.classify).not.toHaveBeenCalled();
+
+    const spawn = registeredTool(api, "subagent_interactive");
+    await executeTool(
+      spawn,
+      {
+        name: "api-specialist",
+        task: "Own API migration",
+        routingDescription: "Own API migration",
+      },
+      ctx,
+    );
+    expect((await route()).details.decision).toEqual({
+      kind: "error",
+      reason: "unavailable",
+    });
+    expect(modelRegistry.classify).not.toHaveBeenCalled();
+
+    modelRegistry.getProviderAuthStatus.mockReturnValue({ configured: true });
+    modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult("none", { candidate_0: 0.05, none: 0.95 }),
+    );
+    expect((await route()).details.decision).toMatchObject({
+      kind: "no_match",
+      reason: "new_child_recommended",
+    });
+    expect(modelRegistry.classify).toHaveBeenCalledOnce();
+    expect(modelRegistry.classify.mock.calls[0][0]).toBe(model);
+    expect(
+      Object.keys(
+        modelRegistry.classify.mock.calls[0][1].questions.route.criteria,
+      ),
+    ).toEqual(["candidate_0", "none"]);
+    expect((await route()).details.decision).toMatchObject({
+      kind: "match",
+      childId: CHILD_A,
+    });
+
+    await executeTool(
+      spawn,
+      {
+        name: "release-specialist",
+        task: "Explicitly start a new release specialist",
+        routingDescription: "Own release verification",
+      },
+      toolCtx,
+    );
+    const listed = await executeTool(
+      registeredTool(api, "list_orchestrator_agents"),
+      {},
+      toolCtx,
+    );
+    expect(listed.details.agents).toContainEqual(
+      expect.objectContaining({
+        childId: CHILD_B,
+        attachable: true,
+      }),
+    );
+    const sent = await executeTool(
+      registeredTool(api, "send_interactive_subagent_message"),
+      {
+        id: CHILD_A,
+        message: "Explicit follow-up for the API specialist",
+      },
+      toolCtx,
+    );
+    expect(sent.details.status).toBe("sent");
+    expect(modelRegistry.classify).toHaveBeenCalledTimes(2);
+
+    modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult("candidate_0", {
+        candidate_0: 0.9,
+        candidate_1: 0.05,
+        none: 0.05,
+      }),
+    );
+    expect((await route()).details.decision).toMatchObject({
+      kind: "match",
+      childId: CHILD_A,
+    });
+    expect(modelRegistry.classify).toHaveBeenCalledTimes(3);
+    expect(mockSendCommandToPane).toHaveBeenCalledOnce();
+    expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
   });
 
   it("states the prompt-only no-reuse policy for visibility-guard design", async () => {

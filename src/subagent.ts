@@ -38,7 +38,11 @@ import {
 } from "./tools/in-process";
 import { registerInteractiveSubagentTools } from "./tools/interactive";
 import { registerOrchestratorTools } from "./tools/orchestrator";
-import { isRoutingEnabled } from "./routing-factory";
+import {
+  FORCE_JEV_FLAG,
+  isForceJevEnabled,
+  isRoutingEnabled,
+} from "./routing-factory";
 import { detectEnvironment } from "./environment";
 import { registerSessionHandlers } from "./session-handlers";
 import {
@@ -161,6 +165,32 @@ reuse. Treat the advisor as a bounded selection aid; all sending, creation, and
 lifecycle control remain with the parent.
 `.trim();
 
+const ORCHESTRATOR_V2_FORCE_JEV_GUIDANCE = `
+## Required native routing advice
+
+This rule replaces optional advice and prompt-only exact reuse for implicit
+native owner decisions. Respect the execution surface precedence above.
+Explicit child identity, explicit new-child instructions, and attach/focus
+requests bypass the advisor and follow existing policy. Clarify unclear action,
+scope, deliverable, or access before routing.
+
+For a clear task with no explicit target, call list_orchestrator_agents first.
+If the registry is complete and has no eligible children, use existing policy
+without classification. Do not infer absence from stale or incomplete state.
+Otherwise, before implicit native reuse or creation, call
+resolve_orchestrator_route with the original task, even when exactly one child is eligible.
+Do not send transcripts, secrets, or unrelated context to the advisor.
+
+On a match, send the original task to that child only if its confirmed
+responsibility, scope, and access cover the request. Do not replace a child on
+send failure. On new_child_recommended, create only when existing policy
+authorizes it; the advice itself does not grant permission. On low_confidence
+or ambiguous, ask a focused owner question instead of guessing or creating.
+On any error, including unavailable, report that required classifier advice
+could not be obtained; do not fall back to prompt-only routing or another classifier.
+On cancellation, stop routing that request.
+`.trim();
+
 export default function (pi: ExtensionAPI) {
   const environment = detectEnvironment();
   const inheritedChildMarker = process.env.PI_SUBAGENTURA_CHILD === "1";
@@ -228,7 +258,9 @@ export default function (pi: ExtensionAPI) {
     if (includeOrchestratorV2) {
       prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
       if (includeSplit) prompts.push(ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT);
-      if (isRoutingEnabled(process.env, ctx.modelRegistry)) {
+      if (isForceJevEnabled(pi)) {
+        prompts.push(ORCHESTRATOR_V2_FORCE_JEV_GUIDANCE);
+      } else if (isRoutingEnabled(process.env, ctx.modelRegistry)) {
         prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
       }
     }
@@ -266,6 +298,12 @@ export default function (pi: ExtensionAPI) {
   });
   pi.registerFlag("orchestratorv2", {
     description: "Append the bundled Orchestratorv2 thin-router prompt",
+    type: "boolean",
+    default: false,
+  });
+  pi.registerFlag(FORCE_JEV_FLAG, {
+    description:
+      "Require configured classifier advice for implicit Orchestratorv2 owner decisions",
     type: "boolean",
     default: false,
   });

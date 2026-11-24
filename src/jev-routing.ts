@@ -45,25 +45,28 @@ interface NativeClassifierRegistry {
 
 export interface JevRoutingEngineOptions {
   env?: NodeJS.ProcessEnv;
+  forceJev?: boolean;
   modelRegistry?: unknown;
   onUsage?: (usage: Usage) => void;
 }
 
 export function isJevRoutingConfigured(
   env: NodeJS.ProcessEnv = process.env,
+  forceJev = false,
 ): boolean {
-  return env[ROUTING_PROVIDER_ENV] === "jev";
+  return forceJev || env[ROUTING_PROVIDER_ENV] === "jev";
 }
 
 export function createJevRoutingEngine(
   options: JevRoutingEngineOptions = {},
 ): RoutingEngine | undefined {
   const env = options.env ?? process.env;
+  const forceJev = options.forceJev === true;
   const registry = nativeRegistry(options.modelRegistry);
   const model = registry ? configuredModel(registry, env) : undefined;
   const config = readSystemOneConfig(env);
   if (
-    !isJevRoutingConfigured(env) ||
+    !isJevRoutingConfigured(env, forceJev) ||
     !registry ||
     !model ||
     config.kind !== "ready"
@@ -73,7 +76,7 @@ export function createJevRoutingEngine(
   return {
     async decide(input, signal) {
       if (signal?.aborted) return { kind: "cancelled" };
-      if (!isJevRoutingConfigured(env))
+      if (!isJevRoutingConfigured(env, forceJev))
         return { kind: "error", reason: "disabled" };
       const currentModel = configuredModel(registry, env);
       if (!currentModel) return { kind: "error", reason: "unavailable" };

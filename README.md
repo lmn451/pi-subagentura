@@ -577,6 +577,14 @@ authorized native child, and the parent still sends the original task.
 See [Jev routing](docs/jev-routing.md) for provider choices, payload disclosure,
 and failure behavior.
 
+To require the configured classifier for implicit native owner decisions, start
+Pi with `pi --orchestratorv2 --force-jev`. The flag removes the need for the
+`PI_ORCHESTRATOR_ROUTER` opt-in; it does not change provider/model overrides.
+It includes decisions with only one eligible child, but not explicit targets,
+explicit new-child requests, attach/focus, or host-managed routing. The
+requirement to call the advisor is prompt policy, not a runtime gate on send
+or spawn.
+
 ## Cancellation context snapshots (opt-in)
 
 Cancellation snapshots are **disabled by default**. To enable bounded snapshots before parent-initiated cancellation, set:

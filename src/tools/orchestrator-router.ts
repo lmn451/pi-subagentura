@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { isOrchestratorV2Enabled } from "../completion-turn";
 import {
   createRoutingEngine,
+  isForceJevEnabled,
   isRoutingConfigured,
   isRoutingEnabled,
 } from "../routing-factory";
@@ -106,12 +107,17 @@ export function registerOrchestratorRouterTool(
   registrationScope?: SessionScope,
   options: RouterRegistrationOptions = {},
 ): boolean {
-  if (!isOrchestratorV2Enabled(pi) || !isRoutingConfigured()) return false;
+  if (!isOrchestratorV2Enabled(pi)) return false;
+  const forceJev = isForceJevEnabled(pi);
+  if (!isRoutingConfigured(process.env, forceJev)) return false;
+  // Forced mode needs an explicit unavailable result, even on older Pi hosts.
   if (
+    !forceJev &&
     !options.createEngine &&
     !isRoutingEnabled(process.env, options.modelRegistry)
-  )
+  ) {
     return false;
+  }
 
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
@@ -125,21 +131,25 @@ export function registerOrchestratorRouterTool(
     parameters: ResolveOrchestratorRouteParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       let usage: Usage | undefined;
+      const forceJev = isForceJevEnabled(pi);
+      const createNativeEngine = () =>
+        createRoutingEngine({
+          forceJev,
+          modelRegistry: ctx.modelRegistry,
+          onUsage: (sample) => {
+            usage = sample;
+          },
+        });
       const result = await resolveOrchestratorRoute({
         pi,
         toolToken,
         params,
         signal,
         ctx,
-        createEngine:
-          options.createEngine ??
-          (() =>
-            createRoutingEngine({
-              modelRegistry: ctx.modelRegistry,
-              onUsage: (sample) => {
-                usage = sample;
-              },
-            })),
+        forceJev,
+        createEngine: forceJev
+          ? createNativeEngine
+          : (options.createEngine ?? createNativeEngine),
       });
       return { ...result, ...(usage ? { usage } : {}) };
     },
@@ -153,13 +163,17 @@ async function resolveOrchestratorRoute(params: {
   params: { task: string };
   signal?: AbortSignal;
   ctx: unknown;
+  forceJev: boolean;
   createEngine?: () => RoutingEngine | undefined;
 }): Promise<{
   content: [{ type: "text"; text: string }];
   details: { status: "advice"; decision: RoutingDecision };
 }> {
   let decision: RoutingDecision;
-  if (!isOrchestratorV2Enabled(params.pi) || !isRoutingConfigured()) {
+  if (
+    !isOrchestratorV2Enabled(params.pi) ||
+    !isRoutingConfigured(process.env, params.forceJev)
+  ) {
     decision = errorDecision("disabled");
     return routingAdviceResult(decision);
   }
