@@ -470,14 +470,13 @@ This is the core v2 model in miniature: **you can keep talking with the orchestr
 
 > Replays generated with [vibe-replay](https://github.com/tuo-lei/vibe-replay), an interactive replay and sharing tool for AI coding sessions.
 
-With `--orchestratorv2 --split`, the parent decomposes
-broad requests into one interactive child per independent part and reuses exact
-live owners. A clear narrow request can create one specialist without another
-spawn approval, including read-only investigation. Explicit stale continuations
-and unresolved scope still require a meaningful decision. The parent reads child
-reports and synthesizes the result while leaving repository work to specialists;
-this is prompt guidance, not an enforced routing boundary. Execution-surface
-selection still follows explicit user choices and shared host guidance.
+With `--orchestratorv2 --split`, the parent decomposes broad requests into one
+interactive child per independent part when no native advisor applies. With an
+applicable advisor, it assesses a safe whole-request description first, even
+with zero eligible children. Only `split_needed` leads to separate part
+assessments and handoffs. The parent reuses exact live owners, reads reports,
+and synthesizes the result. This is prompt guidance, not a runtime dispatch
+gate. Existing authority checks, explicit targets, and host guidance still apply.
 
 For interactive children in the matching parent session, artifacts, routing state,
 pending deliveries, and receipts persist and rehydrate across same-session
@@ -486,10 +485,10 @@ jobs and background workflows remain session-scoped.
 
 Orchestratorv2 adds exactly two routing-metadata tools:
 `list_orchestrator_agents` and `update_orchestrator_agent_description`.
-An optional native classifier advisor can recommend an existing child; the
-parent still sends the task. See [Enable the optional classifier advisor](#enable-the-optional-classifier-advisor)
-for setup and [Jev routing](docs/jev-routing.md) for its configuration and
-failure behavior.
+A native classifier advisor can recommend an existing child or advise on
+splitting; the parent still sends each authorized handoff separately. See
+[Enable the optional classifier advisor](#enable-the-optional-classifier-advisor)
+and [Jev routing](docs/jev-routing.md) for setup, privacy, and failure behavior.
 
 Confirmed records include explicit `provenance`: `user` or `orchestratorv2`.
 Responsibility updates use a server-issued, single-use confirmation token bound
@@ -572,9 +571,10 @@ Configure an OpenAI API key through Pi's normal provider authentication;
 ChatGPT OAuth does not authorize Decisions API requests, and a stored OpenAI
 login can take precedence over `OPENAI_API_KEY`. Catalog/auth configuration is
 not a live provider health check. Provider/model settings select the
-classifier, not a child agent: the advisor can recommend only a currently
-authorized native child, and the parent still sends the original task.
-See [Jev routing](docs/jev-routing.md) for provider choices, payload disclosure,
+classifier, not a child agent. Give the advisor a minimal safe
+`routingDescription`, not the full request or work material. If no safe
+description is sufficient, do not call it; ask for safe rephrasing or an
+explicit target. See [Jev routing](docs/jev-routing.md) for payload disclosure
 and failure behavior.
 
 To require the configured classifier for implicit native owner decisions, start

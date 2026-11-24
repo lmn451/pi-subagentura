@@ -534,6 +534,92 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(mockSendCommandToPane).not.toHaveBeenCalled();
   });
 
+  it("registers the forced advisor when the host lacks classify and fails closed", async () => {
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER", undefined);
+    const { api, ctx } = setupScenario(true);
+    api.getFlag.mockImplementation((name) =>
+      ["orchestratorv2", "force-jev"].includes(name),
+    );
+    const { classify, ...modelRegistry } = nativeClassifierRegistry();
+    const toolCtx = { ...ctx, modelRegistry };
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("Unexpected classifier transport"));
+
+    try {
+      for (const [event, handler] of api.on.mock.calls) {
+        if (event === "before_agent_start") {
+          await handler({ systemPrompt: "base prompt" }, toolCtx);
+        }
+      }
+      const advisor = registeredTool(api, "resolve_orchestrator_route");
+      expect(advisor).toBeDefined();
+
+      await executeTool(
+        registeredTool(api, "subagent_interactive"),
+        {
+          name: "api-specialist",
+          task: "Own API migration",
+          routingDescription: "Own API migration",
+        },
+        toolCtx,
+      );
+      const listed = await executeTool(
+        registeredTool(api, "list_orchestrator_agents"),
+        {},
+        toolCtx,
+      );
+      expect(listed.details.agents).toEqual([
+        expect.objectContaining({
+          childId: CHILD_A,
+          actionable: true,
+          liveness: "alive",
+          stale: false,
+        }),
+      ]);
+      const result = await executeTool(
+        advisor,
+        { routingDescription: "Continue API migration" },
+        toolCtx,
+      );
+      expect(result.details.decision).toEqual({
+        kind: "error",
+        reason: "unavailable",
+      });
+      expect(classify).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it("registers the forced advisor only once across session start and repeated turns", async () => {
+    vi.stubEnv("PI_ORCHESTRATOR_ROUTER", undefined);
+    const { api, ctx } = setupScenario(true);
+    api.getFlag.mockImplementation((name) =>
+      ["orchestratorv2", "force-jev"].includes(name),
+    );
+    const toolCtx = { ...ctx, modelRegistry: nativeClassifierRegistry() };
+    const advisorRegistrations = () =>
+      api.registerTool.mock.calls.filter(
+        ([definition]) => definition.name === "resolve_orchestrator_route",
+      );
+    const emit = async (type: string, event: object) => {
+      for (const [name, handler] of api.on.mock.calls) {
+        if (type === name) await handler(event, toolCtx);
+      }
+    };
+
+    expect(advisorRegistrations()).toHaveLength(0);
+    await emit("session_start", { type: "session_start", reason: "startup" });
+    expect(advisorRegistrations()).toHaveLength(1);
+    for (const prompt of ["First request", "Second request"]) {
+      await emit("before_agent_start", { prompt, systemPrompt: "base prompt" });
+      expect(advisorRegistrations()).toHaveLength(1);
+    }
+    expect(toolCtx.modelRegistry.classify).not.toHaveBeenCalled();
+  });
+
   it("requires advice for implicit ownership with one or two children, not zero", async () => {
     vi.stubEnv("PI_ORCHESTRATOR_ROUTER", undefined);
     vi.stubEnv("PI_ORCHESTRATOR_ROUTER_PROVIDER", "openai");
@@ -573,7 +659,7 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     const route = () =>
       executeTool(
         registeredTool(api, "resolve_orchestrator_route"),
-        { task: "Continue API migration" },
+        { routingDescription: "Continue API migration" },
         toolCtx,
       );
     expect((await route()).details.decision).toEqual({

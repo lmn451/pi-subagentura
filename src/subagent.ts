@@ -124,20 +124,38 @@ const INTERACTIVE_SUBAGENT_SYSTEM_PROMPT = readFileSync(
   "utf8",
 ).trim();
 
+const ORCHESTRATOR_V2_ROUTING_PRIVACY_GUIDANCE = `
+## Classifier-safe routing descriptions
+
+Use \`routingDescription\` for a minimal classifier-safe description of the
+action, scope, deliverable, and required access, not the original message.
+Keep embedded work material out of classifier input: no transcripts, document
+or code excerpts, credentials, private details, or unrelated context. The
+advisor supplies candidate responsibilities and aliases itself. Keep those
+fields safe for external processing too; if they contain private material that
+is not safe to send, do not call the advisor.
+
+If no safe description is sufficient, do not call the advisor. This applies
+to the whole assessment and each part, even with zero eligible children. Do
+not substitute the raw request in any field or infer a route from the omitted
+call. Report the blocker and ask for a safe rephrasing or an explicit target.
+Keep any authorized work material in a separate handoff to the worker who
+needs it, limited to that worker's assigned scope.
+`.trim();
+
 const ORCHESTRATOR_V2_ROUTING_GUIDANCE = `
 ## Optional routing advisor
 
-When the user's action, target/scope, deliverable, and required access are clear
-and only the choice of current owner is uncertain, use the advisor to help select
-among current owners. Call list_orchestrator_agents first, then
-resolve_orchestrator_route with the user's original task. The advisor obtains
-current authoritative candidates itself; do not pass it transcripts, file
-contents, secrets, or unrelated context.
+In split mode, follow the whole-first split policy before any implicit reuse or
+creation, then follow it for each part. Outside split mode, when the user's
+action, target/scope, deliverable, and access are clear and only ownership is
+uncertain, call list_orchestrator_agents first and use resolve_orchestrator_route.
 
 On kind="match", use the returned childId as the id of
-send_interactive_subagent_message and send the original task. The recommendation
-does not expand the child's responsibility or permissions. If the send fails
-because the child is unavailable, surface that state instead of replacing it.
+send_interactive_subagent_message and send only the authorized handoff for the
+assessed whole request or part. The recommendation does not expand the child's
+responsibility or permissions. If the send fails because the child is unavailable,
+surface that state instead of replacing it.
 
 On kind="no_match" with reason="new_child_recommended", creation is permitted
 under the existing policy, but the recommendation alone neither mandates nor
@@ -149,19 +167,20 @@ plausible-owner choice remains unresolved, ask about that choice, not for spawn
 approval.
 
 On kind="error", or when the advisor is unavailable, do not act on an advisor
-recommendation. Fall back to the current authoritative registry metadata and the
-base routing policy: reuse an exact live authorized owner, or, when none is
-suitable and the request is clear, create one specialist without a redundant
-approval prompt. Never let an error or recommendation override current registry
-authority. On kind="cancelled", stop routing that request; do not send a task or
-ask a follow-up about it.
+recommendation. For an attempted split or part assessment, report the blocker
+instead of guessing a split or handoff. For unsplit optional advice, fall back
+to current authoritative registry metadata and the base routing policy: reuse
+an exact live authorized owner, or, when none is suitable and the request is
+clear, create one specialist without a redundant approval prompt. Never let
+an error or recommendation override authority. On kind="cancelled", stop
+routing that request; do not send a task or ask a follow-up about it.
 
 Explicit child identity, explicit new-child instructions, and attach/focus
-requests bypass the advisor and follow the existing policy. A clear exact
-continuation may still route directly. Unclear action, scope, deliverable, or
-access requires clarification; uncertainty only about which current owner fits
+requests bypass the advisor and follow the existing policy. Outside split mode,
+a clear exact continuation may still route directly. Clarify unclear action,
+scope, deliverable, or access; uncertainty only about which current owner fits
 is a routing question, not unclear user scope. Aliases alone never authorize
-reuse. Treat the advisor as a bounded selection aid; all sending, creation, and
+reuse. Treat the advisor as a bounded selection aid; sending, creation, and
 lifecycle control remain with the parent.
 `.trim();
 
@@ -175,18 +194,18 @@ requests bypass the advisor and follow existing policy. Clarify unclear action,
 scope, deliverable, or access before routing.
 
 For a clear task with no explicit target, call list_orchestrator_agents first.
-For whole-request assessment under --split, follow the split policy first, including with zero children.
-Otherwise, if the registry is complete and has no eligible children, use existing policy
-without classification. Do not infer absence from stale or incomplete state.
-Otherwise, before implicit native reuse or creation, call
-resolve_orchestrator_route with the original task, even when exactly one child is eligible.
-Do not send transcripts, secrets, or unrelated context to the advisor.
+In split mode, follow the whole-first split policy for both the whole request
+and each part. Outside split mode, a complete registry with no eligible children
+needs no classifier call; do not infer absence from stale or incomplete state.
+Outside split mode with eligible children, call resolve_orchestrator_route
+before implicit native reuse or creation, even when exactly one child is eligible.
 
-On a match, send the original task to that child only if its confirmed
-responsibility, scope, and access cover the request. Do not replace a child on
-send failure. On new_child_recommended, create only when existing policy
-authorizes it; the advice itself does not grant permission. On low_confidence
-or ambiguous, ask a focused owner question instead of guessing or creating.
+On a match, send only the authorized handoff for the assessed whole request or
+part, and only if the child's confirmed responsibility, scope, and access cover
+that handoff. Do not replace a child on send failure. On new_child_recommended,
+create only when existing policy authorizes it. The advice itself does not
+grant permission. On low_confidence or ambiguous, ask a focused owner
+question instead of guessing or creating.
 On any error, including unavailable, report that required classifier advice
 could not be obtained; do not fall back to prompt-only routing or another classifier.
 On cancellation, stop routing that request.
@@ -260,9 +279,15 @@ export default function (pi: ExtensionAPI) {
       prompts.push(ORCHESTRATOR_V2_SYSTEM_PROMPT);
       if (includeSplit) prompts.push(ORCHESTRATOR_V2_SPLIT_SYSTEM_PROMPT);
       if (isForceJevEnabled(pi)) {
-        prompts.push(ORCHESTRATOR_V2_FORCE_JEV_GUIDANCE);
+        prompts.push(
+          ORCHESTRATOR_V2_FORCE_JEV_GUIDANCE,
+          ORCHESTRATOR_V2_ROUTING_PRIVACY_GUIDANCE,
+        );
       } else if (isRoutingEnabled(process.env, ctx.modelRegistry)) {
-        prompts.push(ORCHESTRATOR_V2_ROUTING_GUIDANCE);
+        prompts.push(
+          ORCHESTRATOR_V2_ROUTING_GUIDANCE,
+          ORCHESTRATOR_V2_ROUTING_PRIVACY_GUIDANCE,
+        );
       }
     }
     prompts.push(...hostPrompts);

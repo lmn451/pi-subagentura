@@ -17,7 +17,10 @@ import {
 } from "../src/session-scope";
 import { registerOrchestratorRouterTool } from "../src/tools/orchestrator-router";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
-import { nativeClassifierRegistry } from "./helpers/native-classifier";
+import {
+  classifierResult,
+  nativeClassifierRegistry,
+} from "./helpers/native-classifier";
 
 const CHILD_A = "0123456789abcdef";
 const CHILD_B = "fedcba9876543210";
@@ -205,6 +208,140 @@ describe("orchestrator routing advisor", () => {
     });
     expect(result.content[0].text).toContain("recommends creating a new child");
     expect(decide).not.toHaveBeenCalled();
+  });
+
+  describe("uncertain routing authority in forced split mode", () => {
+    function startRoute() {
+      const value = api();
+      value.getFlag.mockImplementation((name) =>
+        ["orchestratorv2", "force-jev", "split"].includes(name),
+      );
+      const scope = registerSessionScope({
+        id: 1,
+        generation: 0,
+        lifecycle: "started",
+        pi: value as never,
+        cwd: root,
+        sessionManager: { getSessionId: () => "parent-1" },
+      });
+      const modelRegistry = nativeClassifierRegistry();
+      expect(registerOrchestratorRouterTool(value as never, scope)).toBe(true);
+      return {
+        scope,
+        modelRegistry,
+        execute(entries: readonly OrchestratorRoutingEntry[], part: boolean) {
+          return tool(value).execute(
+            "route-authority",
+            { routingDescription: "Review the API", ...(part ? { part } : {}) },
+            undefined,
+            undefined,
+            { ...context(root, entries), modelRegistry },
+          );
+        },
+      };
+    }
+
+    it.each([
+      "empty",
+      "cache only",
+      "missing runtime",
+      "unknown liveness",
+      "dead runtime",
+    ] as const)("distinguishes %s from an uncertain owner", async (state) => {
+      const { execute, modelRegistry, scope } = startRoute();
+      const entries: OrchestratorRoutingEntry[] = [];
+      const entry = routingEntry(CHILD_A);
+      if (state === "cache only") upsertOrchestratorRoutingEntry(root, entry);
+      if (state !== "empty" && state !== "cache only") entries.push(entry);
+      if (state === "unknown liveness" || state === "dead runtime") {
+        scope.interactiveStates.set(CHILD_A, runtimeState(CHILD_A, scope));
+        __setTmuxMultiplexer({
+          getPaneLivenessAsync: vi
+            .fn()
+            .mockResolvedValue(
+              state === "unknown liveness" ? "unknown" : "dead",
+            ),
+        } as never);
+      }
+
+      const result = await execute(entries, true);
+
+      expect(result.details.decision).toEqual(
+        state === "missing runtime" || state === "unknown liveness"
+          ? { kind: "error", reason: "incomplete_registry" }
+          : { kind: "no_match", reason: "new_child_recommended" },
+      );
+      expect(modelRegistry.classify).not.toHaveBeenCalled();
+    });
+
+    it("invalidates an empty projection when authority changes during its probe", async () => {
+      const { execute, modelRegistry, scope } = startRoute();
+      const entries: OrchestratorRoutingEntry[] = [];
+      scope.interactiveStates.set(CHILD_A, runtimeState(CHILD_A, scope));
+      const liveness = Promise.withResolvers<"alive">();
+      const probe = vi.fn().mockReturnValue(liveness.promise);
+      __setTmuxMultiplexer({ getPaneLivenessAsync: probe } as never);
+      const pending = execute(entries, true);
+      await vi.waitFor(() => expect(probe).toHaveBeenCalledOnce());
+      entries.push(routingEntry(CHILD_B));
+      liveness.resolve("alive");
+
+      expect((await pending).details.decision).toEqual({
+        kind: "error",
+        reason: "state_changed",
+      });
+      expect(modelRegistry.classify).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      "discards deferred none when a trusted owner appears (part=%s)",
+      async (part) => {
+        const { execute, modelRegistry, scope } = startRoute();
+        const entries: OrchestratorRoutingEntry[] = [];
+        if (part) {
+          scope.interactiveStates.set(CHILD_A, runtimeState(CHILD_A, scope));
+          entries.push(routingEntry(CHILD_A));
+        }
+        const answer =
+          Promise.withResolvers<ReturnType<typeof classifierResult>>();
+        modelRegistry.classify.mockReturnValue(answer.promise);
+        const pending = execute(entries, part);
+        await vi.waitFor(() =>
+          expect(modelRegistry.classify).toHaveBeenCalledOnce(),
+        );
+        entries.push(routingEntry(CHILD_B));
+        answer.resolve(
+          classifierResult(
+            "none",
+            part ? { candidate_0: 0.1, none: 0.9 } : { split: 0.1, none: 0.9 },
+          ),
+        );
+
+        expect((await pending).details.decision).toEqual({
+          kind: "error",
+          reason: "state_changed",
+        });
+      },
+    );
+
+    it("withholds a none recommendation if another trusted owner is stale", async () => {
+      const { execute, modelRegistry, scope } = startRoute();
+      scope.interactiveStates.set(CHILD_A, runtimeState(CHILD_A, scope));
+      modelRegistry.classify.mockResolvedValue(
+        classifierResult("none", { candidate_0: 0.1, none: 0.9 }),
+      );
+
+      const result = await execute(
+        [routingEntry(CHILD_A), routingEntry(CHILD_B)],
+        true,
+      );
+
+      expect(result.details.decision).toEqual({
+        kind: "error",
+        reason: "incomplete_registry",
+      });
+      expect(modelRegistry.classify).toHaveBeenCalledOnce();
+    });
   });
 
   it("rejects an engine selection for an unknown child", async () => {

@@ -18,8 +18,9 @@ keywords:
 Orchestratorv2 can ask a Pi classifier to advise on the owner of a clear task.
 The extension builds eligible native interactive candidates from the current
 parent session's routing authority and live runtime, then calls Pi's native
-classifier API. The classifier chooses only among those candidates (or `none`);
-it cannot create, message, attach to, or change a child's responsibilities.
+classifier API. The classifier chooses one eligible candidate or `none`; a
+whole-request split assessment also offers `split`. It cannot create, message,
+attach to, or change a child's responsibilities.
 
 Jev models such as `~typesafe/jev-latest` use Pi's native System One path.
 `gpt-6-luna` may be used through Pi's native OpenAI Decisions classifier
@@ -45,26 +46,21 @@ authenticated Pi classifier that supports the typed choice request. Compatible
 non-Jev classifiers are supported. The flag does not select a parent or worker
 chat model.
 
-List current native owners first. For a clear implicit owner decision, use
-`resolve_orchestrator_route` before reusing or creating a child, even when
-there is only one eligible child. A complete registry with no eligible children
-needs no classifier call for a single part. With `--split` and an enabled advisor,
-classify the whole request first, even with zero candidates. On `split_needed`,
-route each independent part with `part: true`; never send the combined request.
-Explicit child targets, explicit new-child requests,
+List current native owners first. For a clear implicit owner decision, give
+`resolve_orchestrator_route` a safe `routingDescription` before reusing or
+creating a child, even when there is only one eligible child. Outside a
+whole-request split assessment, a complete registry with no eligible children
+needs no classifier call. Explicit child targets, explicit new-child requests,
 attach/focus, unclear requests, and host-managed routing follow existing policy.
 
-If the configured classifier cannot provide a decision, the router must not
-guess or use another classifier. The advisor remains registered in forced mode
-and returns `unavailable` when candidates exist but the configuration or
-classifier is unavailable. Abstention does not establish owner absence or
-grant permission to spawn.
+If the configured classifier cannot provide a decision, do not guess or use
+another classifier. The advisor remains registered in forced mode and returns
+`unavailable` when it needs classification but cannot use the configured
+classifier. Abstention does not establish owner absence or authorize a spawn.
 
-At runtime the advisor uses only the configured classifier and validates the
-decision. The requirement to call the advisor, and the bypass rules for explicit
-requests, are **prompt policy**, not a runtime gate on send or spawn. The advisor
-classifies the task text supplied by the parent model and does not verify it
-against the original user text.
+The advisor validates input shape, bounds, and classifier results. The parent
+model's choice to call or bypass it, describe the work safely, split, or dispatch
+one handoff per part is **prompt policy**, not a runtime gate on send or spawn.
 
 ## Enable optional advice without the flag
 
@@ -148,9 +144,10 @@ Optional settings are read only from the process environment:
 | `PI_ORCHESTRATOR_ROUTER_MAX_RESPONSE_BYTES`  | `65536`                | Integer `1..262144`                                           |
 | `PI_ORCHESTRATOR_ROUTER_MAX_TASK_BYTES`      | `16384`                | Integer `1..65536`; tool ceiling is `16384` bytes             |
 
-The llama.cpp `llama-cpp-classify` API is additionally limited to **61 children
-plus `none`**, because it supports 62 choice labels. Oversized candidate sets
-are rejected, never truncated. No universal 62-option Jev limit is assumed.
+The llama.cpp `llama-cpp-classify` API supports 62 choice labels: **60 children
+plus `split` and `none`** for whole split assessment, or **61 children plus
+`none`** otherwise, including for split parts. Oversized candidate sets are
+rejected, never truncated. No universal 62-option Jev limit is assumed.
 
 Request/response bounds cover the extension's serialized classifier context and
 decoded answer, respectively. Pi owns HTTP buffering; the response bound is not
@@ -160,8 +157,8 @@ conservative defaults, not measured accuracy guarantees.
 
 ## Parent flow and authority
 
-This flow describes optional advice. With `--force-jev`, use the required
-advice and error rules above instead of direct implicit reuse or fallback.
+This flow describes unsplit optional advice. For forced mode or split
+assessment, follow the stricter call and error rules for that mode.
 
 1. Call `list_orchestrator_agents` and inspect current authoritative
    responsibilities and runtimes before deciding whether to reuse or create a
@@ -170,10 +167,11 @@ advice and error rules above instead of direct implicit reuse or fallback.
 2. Reuse an exact, live, authorized owner when its confirmed responsibility
    covers the requested action, scope, deliverable, and access. When only the
    choice among plausible owners is uncertain, call
-   `resolve_orchestrator_route({ task: "the original user task" })`.
-3. On `kind: "match"`, send the original task to the returned `childId` through
-   `send_interactive_subagent_message`. A match does not expand the owner's
-   responsibility or permissions.
+   `resolve_orchestrator_route({ routingDescription: "Read-only review of API compatibility; report findings" })`.
+3. On `kind: "match"`, send the authorized handoff for the assessed work to
+   the returned `childId` through `send_interactive_subagent_message`. The
+   handoff is separate from the classifier description. A match does not expand
+   the owner's responsibility or permissions.
 4. On `kind: "no_match", reason: "new_child_recommended"`, creation is permitted
    under the existing policy but is not mandatory. If current authoritative
    metadata shows no suitable owner and the request clearly states its action,
@@ -189,21 +187,43 @@ advice and error rules above instead of direct implicit reuse or fallback.
    prompt. Never follow an erroneous recommendation. On `kind: "cancelled"`,
    stop routing the request.
 
-Ask for clarification only when a substantive request requirement or
-permission remains unclear, such as target, deliverable, read/write/PR scope, or
-whether this is a continuation or new work. Do not expand read-only/reviewer
-permissions. Explicit child IDs, explicit new-child requests, and attach/focus
-requests follow existing policy and bypass the advisor. Aliases remain discovery
-hints.
+### Whole-first flow with `--split`
+
+With an applicable advisor (optional or forced), assess a clear implicit
+native request **before splitting or dispatching**. Call with a safe
+`routingDescription` of the whole request and leave `part` unset. Even with
+zero eligible children, this assessment offers `split` and `none`. `none`
+means no suitable existing child; a match or `new_child_recommended` at this
+stage means one handoff, not a split, and only if existing policy authorizes it.
+
+Only on `split_needed`, separate the distinct authorized parts. Call once per
+part with `part: true` and its own safe `routingDescription`, never the
+combined description. A part offers candidate choices and `none`, not
+`split`. An empty complete eligible registry for a part needs no classifier
+request. Send or assign only the assessed part to its authorized child. Do not
+send another part's work material. Do not infer a split, a match, or permission
+to create from an error or weak advice. If the whole or a part cannot be safely
+described, take the no-call path below.
+
+Without an applicable advisor, use the base scope, authority, and ambiguity
+rules to decompose broad requests into independent handoffs. The advisor never
+applies to explicitly selected targets, explicit new-child requests, attach
+or focus, or host-managed routing.
+
+Apart from the privacy recovery path below, ask for clarification only when a
+substantive request requirement or permission remains unclear, such as target,
+deliverable, read/write/PR scope, or continuation versus new work. Do not
+expand read-only/reviewer permissions. Aliases remain discovery hints.
 
 The advisor builds candidates from the current parent session's authority and
 runtime state, not a model-supplied list. Only live, actionable, non-stale direct
 children with confirmed responsibilities are eligible. Project routing caches
 cannot authorize candidates.
 
-The classifier chooses a request-local token or `none`. The host validates the
-choice, complete probability map, finite values, unit sum, argmax, confidence,
-and separation between the leading options. Scores never expand permissions.
+The classifier chooses a request-local candidate token, `none`, or `split`
+when offered during whole split assessment. The host validates the choice,
+complete probability map, finite values, unit sum, argmax, confidence, and
+separation between the leading options. Scores never expand permissions.
 After advice, the tool rechecks authority, runtime identity, cwd, ownership, and
 availability. Changed state invalidates the recommendation. The normal bounded
 liveness projection is reused, without an extra uncached mux probe.
@@ -214,16 +234,32 @@ a separate Pi feature and is not enabled by this integration.
 
 ## Payload, privacy, and accounting
 
-Pi receives only the task and bounded responsibility descriptions, aliases, and
-statuses under opaque request-local tokens. Child IDs, runtime paths, attach
-commands, artifacts, child output, and transcripts are not added as structured
-payload fields.
+Use `routingDescription` for **only** the minimal action, scope, deliverable,
+and required access the classifier needs. Do not send the original request,
+transcripts, document or code excerpts, secrets, or other private material.
+Keep that material, if needed and authorized, in the separate worker handoff.
+For a part, omit other parts' instructions and materials.
 
-Free text is scrubbed for child IDs, environment secret values, known credential
-formats, credential-bearing URLs, and obvious sensitive paths. Arbitrary secrets
-(including credentials stored only in Pi) cannot all be identified; do not paste
-sensitive content into advisor tasks. Review the provider's privacy policy before
-enabling external processing.
+If no safe description is sufficient at either stage, **do not call** the
+advisor, even with zero eligible children. Report the blocker and ask for a
+safe rephrasing or an explicit target. Do not infer a route from the omitted
+call. Older optional non-split callers may still supply `task` alone
+without `part`; these callers have the same duty to send only safe routing
+text. Forced mode and split mode require `routingDescription`. The tool
+rejects missing, blank, oversized, or conflicting input rather than using a
+raw task as a substitute.
+
+Pi receives the supplied routing description and bounded candidate
+responsibilities, aliases, and statuses under opaque request-local tokens.
+Child IDs, runtime paths, attach commands, artifacts, child output, and
+transcripts are not added as structured payload fields. Keep candidate
+responsibilities and aliases safe for external processing too. Do not call
+if those fields contain private material that is not safe to send.
+
+The adapter applies best-effort scrubbing for known patterns and values.
+It cannot identify arbitrary private text, infer whether a description is
+safe, or verify it against the original user message. Review the provider's
+privacy policy before enabling external processing.
 
 Results contain local candidate IDs, numeric evidence, and closed failure reasons,
 not raw provider errors or credentials. Validated classifier usage is returned as
