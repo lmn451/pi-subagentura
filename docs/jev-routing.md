@@ -205,6 +205,9 @@ whole-request match gives one handoff to an authorized owner. On `no_match`,
 apply the owner-selection rule to the whole request: if reliable discovery
 establishes no suitable owner, create one specialist, not a split.
 
+On `split_uncertain`, ask the user whether to split the request. Do not split,
+send, or create a child until the user answers.
+
 Only on `split_needed`, separate the distinct authorized parts. Call once per
 part with `part: true` and its own safe `routingDescription`, never the
 combined description. A part offers candidate choices and `none`, not

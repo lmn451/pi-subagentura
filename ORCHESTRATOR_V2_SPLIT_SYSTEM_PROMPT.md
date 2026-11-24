@@ -27,6 +27,9 @@ list current agents and call `resolve_orchestrator_route` with a minimal, safe
 Leave `part` unset. A whole-request match or new-child recommendation is a
 single handoff, not a split. Existing authority still decides whether to act.
 
+On `split_uncertain`, ask the user whether to split the request. Do not split,
+send, or create a child until the user answers.
+
 Only on `split_needed`, separate the independent authorized parts. For each
 part, call the advisor with `part: true` and a distinct safe `routingDescription`
 for that part alone. Never split a part again. Send or assign only the approved

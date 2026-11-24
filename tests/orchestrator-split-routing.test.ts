@@ -272,7 +272,7 @@ describe("registered split advisor with a stub classifier", () => {
     );
     const result = await scenario.call(advisor, { routingDescription: whole });
     expect(result.details.decision).toMatchObject({
-      kind: "no_match",
+      kind: "split_uncertain",
       reason: "low_confidence",
     });
     expect(choices(scenario.modelRegistry)).toEqual([
@@ -475,3 +475,20 @@ describe("registered split advisor with a stub classifier", () => {
     expect(choices(modelRegistry, 1)).not.toContain("split");
   });
 });
+it.each(["optional", "forced"] as const)(
+  "asks about a narrow split decision with no children in %s mode",
+  async (mode) => {
+    const s = await setup(mode);
+    s.modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult("split", { split: 0.51, none: 0.49 }),
+    );
+    const result = await s.call(advisor, { routingDescription: whole });
+    expect(result.details.decision.kind).toBe("split_uncertain");
+    expect(result.content[0].text).toContain(
+      "Do not split, send, or create a child",
+    );
+    expect(s.prompt).toContain("On `split_uncertain`");
+    expect(send).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  },
+);

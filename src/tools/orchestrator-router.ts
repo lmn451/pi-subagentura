@@ -784,6 +784,13 @@ function sanitizeDecision(
   const evidence = safeEvidence(raw.evidence);
   if (raw.kind === "split_needed" && assessSplit && evidence)
     return { kind: "split_needed", evidence };
+  if (
+    raw.kind === "split_uncertain" &&
+    assessSplit &&
+    evidence &&
+    (raw.reason === "low_confidence" || raw.reason === "ambiguous")
+  )
+    return { kind: "split_uncertain", reason: raw.reason, evidence };
   if (raw.kind === "match") {
     if (
       typeof raw.childId !== "string" ||
@@ -858,17 +865,19 @@ function routingAdviceResult(decision: RoutingDecision): {
   details: { status: "advice"; decision: RoutingDecision };
 } {
   const text =
-    decision.kind === "split_needed"
-      ? "Separate the independent parts. Resolve each part with part=true and its own safe routingDescription. If no safe description is sufficient, abstain for that part. Send only the authorized part to its owner, not the combined request."
-      : decision.kind === "match"
-        ? `Routing advisor selected existing child ${decision.childId}.`
-        : decision.kind === "no_match"
-          ? decision.reason === "new_child_recommended"
-            ? "Routing advisor recommends creating a new child for this task; this is advice only."
-            : `Routing advisor abstained (${decision.reason}).`
-          : decision.kind === "cancelled"
-            ? "Routing advisor cancelled this routing request."
-            : `Routing advisor could not decide (${decision.reason}).`;
+    decision.kind === "split_uncertain"
+      ? "Ask the user whether to split the request. Do not split, send, or create a child until the user answers."
+      : decision.kind === "split_needed"
+        ? "Separate the independent parts. Resolve each part with part=true and its own safe routingDescription. If no safe description is sufficient, abstain for that part. Send only the authorized part to its owner, not the combined request."
+        : decision.kind === "match"
+          ? `Routing advisor selected existing child ${decision.childId}.`
+          : decision.kind === "no_match"
+            ? decision.reason === "new_child_recommended"
+              ? "Routing advisor recommends creating a new child for this task; this is advice only."
+              : `Routing advisor abstained (${decision.reason}).`
+            : decision.kind === "cancelled"
+              ? "Routing advisor cancelled this routing request."
+              : `Routing advisor could not decide (${decision.reason}).`;
   return {
     content: [{ type: "text", text: `${text}\n${JSON.stringify(decision)}` }],
     details: { status: "advice", decision },
