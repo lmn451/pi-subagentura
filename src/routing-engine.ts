@@ -15,6 +15,7 @@ export interface RoutingCandidate {
 
 export interface RoutingInput {
   task: string;
+  assessSplit?: boolean;
   candidates: readonly RoutingCandidate[];
 }
 
@@ -44,6 +45,7 @@ export type RoutingErrorReason =
   | "incomplete_registry";
 
 export type RoutingDecision =
+  | { kind: "split_needed"; evidence: RoutingEvidence }
   | { kind: "match"; childId: string; evidence: RoutingEvidence }
   | {
       kind: "no_match";

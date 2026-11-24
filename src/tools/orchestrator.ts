@@ -22,7 +22,6 @@ import {
   type OrchestratorRoutingEntry,
 } from "../orchestrator-routing";
 import { isOrchestratorV2Enabled } from "../completion-turn";
-import { isRoutingConfigured } from "../routing-factory";
 import {
   resolveToolSessionScope,
   type SessionScope,
@@ -416,7 +415,7 @@ export function registerOrchestratorTools(
 
   // Classifier capabilities and late-bound CLI flags are available through
   // lifecycle contexts, not the extension factory. Retry after login/catalog changes.
-  if (isRoutingConfigured() && typeof pi.on === "function") {
+  if (typeof pi.on === "function") {
     pi.on("session_start", registerRouterWhenEnabled);
     pi.on("before_agent_start", registerRouterWhenEnabled);
   }

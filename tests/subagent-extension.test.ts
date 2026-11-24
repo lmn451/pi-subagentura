@@ -254,7 +254,7 @@ describe("extension registration", () => {
       "Do not ask the user for permission merely to create that specialist",
     );
     expect(result.systemPrompt).not.toContain(
-      "Every broad user-originated request must be decomposed into the smallest practical independent parts",
+      "Without an applicable native routing advisor, decompose broad requests",
     );
     expect(result.systemPrompt).not.toContain(
       "exactly one interactive child for each part",
@@ -341,10 +341,10 @@ describe("extension registration", () => {
       "Synthesize the direct children's verified results into one user-facing answer",
     );
     expect(result.systemPrompt).toContain(
-      "Every broad user-originated request must be decomposed into the smallest practical independent parts",
+      "Without an applicable native routing advisor, decompose broad requests",
     );
     expect(result.systemPrompt).toContain(
-      "exactly one interactive child for each part",
+      "exactly one interactive child for each",
     );
     expect(result.systemPrompt).toContain("execution-surface precedence");
   });
@@ -496,7 +496,7 @@ describe("extension registration", () => {
       expect(normalizedPrompt).toContain(policy);
     }
     expect(normalizedPrompt).toContain(
-      "send_interactive_subagent_message and send the original task",
+      "send_interactive_subagent_message and send only the authorized handoff",
     );
     expect(normalizedPrompt).toContain("requests bypass the advisor");
     expect(fetch).not.toHaveBeenCalled();

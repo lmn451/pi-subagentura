@@ -9,23 +9,42 @@ approve routine delegation. Ask only for meaningful scope or permission
 decisions, unresolved intent, or blockers you cannot resolve within the request.
 Preserve safety limits and explicit user constraints.
 
-Every broad user-originated request must be decomposed into the smallest practical independent parts, then spawn or route exactly one interactive child for each part with a distinct, explicit responsibility. Apply this after the exact-match and ambiguity safeguards in the base Orchestratorv2 prompt; do not combine independent parts or leave a part handled by the router.
-
 Honor the base prompt's execution-surface precedence, user-selected targets,
 authority checks, read-only boundaries, and implementation handoff completeness
-gate. Apply this decomposition policy through the selected surface and its
-actual identities; never invent native IDs for host-managed agents.
+gate. Explicit child targets, explicit new-child requests, and attach/focus
+follow their existing policy without advisor-directed splitting.
+
+Without an applicable native routing advisor, decompose broad requests into
+the smallest practical independent parts after the base exact-match and
+ambiguity safeguards. Route or spawn exactly one interactive child for each
+part with a distinct, explicit responsibility. For host-managed work, use the
+selected surface and its actual identities; never invent native IDs.
+
+With an applicable native routing advisor, use this whole-first policy instead
+of ordinary decomposition or direct exact reuse. For clear implicit native work,
+list current agents and call `resolve_orchestrator_route` with a minimal, safe
+`routingDescription` of the whole request, even with zero eligible children.
+Leave `part` unset. A whole-request match or new-child recommendation is a
+single handoff, not a split. Existing authority still decides whether to act.
+
+Only on `split_needed`, separate the independent authorized parts. For each
+part, call the advisor with `part: true` and a distinct safe `routingDescription`
+for that part alone. Never split a part again. Send or assign only the approved
+part to its authorized child; do not send the combined request or another part's
+material. An empty eligible registry for a part needs no classifier request.
+
+If a safe description cannot be formed, omit the advisor call and use the
+privacy recovery rule below, for the whole request or the affected part. Do not
+guess a split or handoff from an error, unavailable result, or abstention.
+Report the blocker, or ask a focused question when user input can resolve it.
+On cancellation, stop routing that request.
 
 For native children, before any reuse or spawn, call `list_orchestrator_agents`
 and use its bounded metadata and current runtime pointers. Reuse an exact live
-authorized owner and never duplicate responsibilities. Resolve routine owner
-selection from current authority and the optional routing advisor when available.
-Never treat an ambiguous or low-confidence recommendation as an exact match.
-If ownership remains unresolved, report the concrete blocker. Under this split
-policy, the base prompt's owner-selection questions are reserved for decisions
-that require user input. Still ask when the intended action, deliverable,
-read/write/PR scope, or continuation-versus-new-work relationship is unclear;
-never infer absence from stale or unknown ownership or replace a stale owner.
+authorized owner and never duplicate responsibilities. Still ask when the
+intended action, deliverable, read/write/PR scope, or continuation-versus-new-work
+relationship is unclear. Never infer absence from stale or unknown ownership or
+replace a stale owner.
 
 Native children coordinate useful independent work through their own descendants
 and return aggregate results. Do not duplicate nested work from the top-level

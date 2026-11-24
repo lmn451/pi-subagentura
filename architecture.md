@@ -226,20 +226,21 @@ enforce a host-level tool allowlist; normal tools remain registered for legacy
 compatibility, while the prompt directs this mode to interactive children.
 
 The optional `PI_ORCHESTRATOR_ROUTER=jev` integration adds the advisory
-`resolve_orchestrator_route` tool only in v2 mode when the native Pi classifier
-API, the configured classifier model, and configured provider authentication
-are available. `PI_ORCHESTRATOR_ROUTER_PROVIDER` and
+`resolve_orchestrator_route` tool in v2 mode when the native Pi classifier API,
+configured model, and configured provider authentication are available.
+`--force-jev` registers the advisor without that opt-in and requires advice
+as prompt policy, not a runtime dispatch gate. `PI_ORCHESTRATOR_ROUTER_PROVIDER` and
 `PI_ORCHESTRATOR_ROUTER_MODEL` select an exact classifier entry from Pi's model
 registry (default `openrouter/~typesafe/jev-latest`); Pi's catalog determines
 its transport, such as System One or OpenAI Decisions. This selects the
 classifier, not the parent chat model or child owner. The extension calls Pi's
 native classifier API and has no HTTP adapter or fallback transport.
 `tools/orchestrator-router.ts` constructs candidates from current parent
-authority/runtime state, then revalidates that state after liveness checks;
-the classifier can advise among those eligible live native children but cannot
-reserve, send to, create, or attach to one. Configured authentication is an
-availability gate, not a live provider/credential health check. See
-[Jev routing](docs/jev-routing.md) for configuration and disclosure.
+authority/runtime state and revalidates that state after liveness checks. With
+`--split`, the advisor can assess a safe whole description before per-part
+assessments. It cannot reserve, send to, create, or attach to a child.
+Configured authentication is an availability gate, not a live provider/credential
+health check. See [Jev routing](docs/jev-routing.md) for input and disclosure.
 
 `src/orchestrator-routing.ts` keeps two related representations:
 

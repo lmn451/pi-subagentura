@@ -4,11 +4,12 @@ import { Type } from "typebox";
 import { isOrchestratorV2Enabled } from "../completion-turn";
 import {
   createRoutingEngine,
+  isForceJevEnabled,
   isRoutingConfigured,
   isRoutingEnabled,
 } from "../routing-factory";
 import {
-  listOrchestratorRoutingEntries,
+  listOrchestratorRoutingAuthorityEntries,
   loadOrchestratorAgentRegistryView,
   type OrchestratorAgentRegistryView,
   type OrchestratorAgentView,
@@ -31,6 +32,7 @@ import type {
   RoutingNoMatchReason,
 } from "../routing-engine";
 import { isValidRoutingEvidence } from "../routing-engine";
+import { isOrchestratorSplitEnabled } from "../settings";
 
 /** Maximum task size handed to the provider adapter. */
 export const MAX_ORCHESTRATOR_ROUTE_TASK_BYTES = 16 * 1024;
@@ -38,12 +40,52 @@ export const MAX_ORCHESTRATOR_ROUTE_TASK_BYTES = 16 * 1024;
 const MAX_ORCHESTRATOR_ROUTE_TASK_CHARS = 16 * 1024;
 
 const ResolveOrchestratorRouteParams = Type.Object({
-  task: Type.String({
-    minLength: 1,
-    maxLength: MAX_ORCHESTRATOR_ROUTE_TASK_CHARS,
-    description: "The original bounded user task to route to one child.",
-  }),
+  part: Type.Optional(
+    Type.Boolean({
+      description: "Set true only for one independent part after split_needed.",
+    }),
+  ),
+  routingDescription: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: MAX_ORCHESTRATOR_ROUTE_TASK_CHARS,
+      description:
+        "Minimal classifier-safe description of action, scope, deliverable, and required access for the whole request or one part. No embedded work material, secrets, private excerpts, or full request text. If a safe description is insufficient, do not call. Do not combine with task.",
+    }),
+  ),
+  task: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: MAX_ORCHESTRATOR_ROUTE_TASK_CHARS,
+      description:
+        "Classifier-safe description for legacy optional non-split callers only. Use routingDescription for new calls. Never supply both fields or use task for forced or split routing.",
+    }),
+  ),
 });
+
+interface RouteInput {
+  routingDescription?: string;
+  task?: string;
+  part?: boolean;
+}
+
+function readRoutingDescription(
+  input: RouteInput | undefined,
+  legacyAllowed: boolean,
+): string | undefined {
+  if (!input || (input.part !== undefined && typeof input.part !== "boolean")) {
+    return undefined;
+  }
+  if (input.task === undefined) return input.routingDescription;
+  if (
+    !legacyAllowed ||
+    input.part !== undefined ||
+    input.routingDescription !== undefined
+  ) {
+    return undefined;
+  }
+  return input.task;
+}
 
 const ROUTING_ERROR_REASONS: ReadonlySet<string> = new Set([
   "disabled",
@@ -106,12 +148,17 @@ export function registerOrchestratorRouterTool(
   registrationScope?: SessionScope,
   options: RouterRegistrationOptions = {},
 ): boolean {
-  if (!isOrchestratorV2Enabled(pi) || !isRoutingConfigured()) return false;
+  if (!isOrchestratorV2Enabled(pi)) return false;
+  const forceJev = isForceJevEnabled(pi);
+  if (!isRoutingConfigured(process.env, forceJev)) return false;
+  // Forced mode needs an explicit unavailable result, even on older Pi hosts.
   if (
+    !forceJev &&
     !options.createEngine &&
     !isRoutingEnabled(process.env, options.modelRegistry)
-  )
+  ) {
     return false;
+  }
 
   const toolToken: SessionToolToken | undefined = registrationScope
     ? { id: registrationScope.id }
@@ -121,25 +168,29 @@ export function registerOrchestratorRouterTool(
     name: "resolve_orchestrator_route",
     label: "Resolve Orchestrator Route",
     description:
-      "Ask the explicitly enabled routing advisor which current, confirmed Orchestratorv2 child best matches the original task. The tool only advises; it never sends, spawns, attaches, or reserves a child.",
+      "Ask the enabled advisor to assess a classifier-safe routing description, not a worker handoff. In split mode, assess the whole description first, then use part=true for each separate part only after split_needed. The tool only advises; it never sends, spawns, attaches, or reserves a child.",
     parameters: ResolveOrchestratorRouteParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       let usage: Usage | undefined;
+      const forceJev = isForceJevEnabled(pi);
+      const createNativeEngine = () =>
+        createRoutingEngine({
+          forceJev,
+          modelRegistry: ctx.modelRegistry,
+          onUsage: (sample) => {
+            usage = sample;
+          },
+        });
       const result = await resolveOrchestratorRoute({
         pi,
         toolToken,
         params,
         signal,
         ctx,
-        createEngine:
-          options.createEngine ??
-          (() =>
-            createRoutingEngine({
-              modelRegistry: ctx.modelRegistry,
-              onUsage: (sample) => {
-                usage = sample;
-              },
-            })),
+        forceJev,
+        createEngine: forceJev
+          ? createNativeEngine
+          : (options.createEngine ?? createNativeEngine),
       });
       return { ...result, ...(usage ? { usage } : {}) };
     },
@@ -150,16 +201,20 @@ export function registerOrchestratorRouterTool(
 async function resolveOrchestratorRoute(params: {
   pi: ExtensionAPI;
   toolToken: SessionToolToken | undefined;
-  params: { task: string };
+  params: RouteInput;
   signal?: AbortSignal;
   ctx: unknown;
+  forceJev: boolean;
   createEngine?: () => RoutingEngine | undefined;
 }): Promise<{
   content: [{ type: "text"; text: string }];
   details: { status: "advice"; decision: RoutingDecision };
 }> {
   let decision: RoutingDecision;
-  if (!isOrchestratorV2Enabled(params.pi) || !isRoutingConfigured()) {
+  if (
+    !isOrchestratorV2Enabled(params.pi) ||
+    !isRoutingConfigured(process.env, params.forceJev)
+  ) {
     decision = errorDecision("disabled");
     return routingAdviceResult(decision);
   }
@@ -172,11 +227,15 @@ async function resolveOrchestratorRoute(params: {
     return routingAdviceResult({ kind: "cancelled" });
   }
 
-  const task = params.params?.task;
+  const split = isOrchestratorSplitEnabled(params.pi);
+  const description = readRoutingDescription(
+    params.params,
+    !params.forceJev && !split,
+  );
   if (
-    typeof task !== "string" ||
-    task.trim().length === 0 ||
-    Buffer.byteLength(task, "utf8") > MAX_ORCHESTRATOR_ROUTE_TASK_BYTES
+    typeof description !== "string" ||
+    description.trim().length === 0 ||
+    Buffer.byteLength(description, "utf8") > MAX_ORCHESTRATOR_ROUTE_TASK_BYTES
   ) {
     return routingAdviceResult(errorDecision("invalid_input"));
   }
@@ -187,8 +246,11 @@ async function resolveOrchestratorRoute(params: {
   const sessionId = sessionIdForScope(scope);
   const requestIdentity = latestUserRequestIdentity(params.ctx);
   const authorityEntries = parentBranchEntries(params.ctx);
+  let initialAuthority: ReturnType<typeof routingAuthoritySnapshot>;
+  let initialAuthorityUnchanged: boolean;
   let initialView: OrchestratorAgentRegistryView;
   try {
+    initialAuthority = routingAuthoritySnapshot(cwd, authorityEntries);
     initialView = await loadOrchestratorAgentRegistryView(
       cwd,
       scope.interactiveStates,
@@ -197,6 +259,9 @@ async function resolveOrchestratorRoute(params: {
         authorityEntries,
       },
     );
+    initialAuthorityUnchanged =
+      initialAuthority.digest ===
+      routingAuthoritySnapshot(cwd, parentBranchEntries(params.ctx)).digest;
   } catch {
     if (params.signal?.aborted) {
       return routingAdviceResult({ kind: "cancelled" });
@@ -225,19 +290,25 @@ async function resolveOrchestratorRoute(params: {
   ) {
     return routingAdviceResult({ kind: "cancelled" });
   }
+  if (!initialAuthorityUnchanged) {
+    return routingAdviceResult(errorDecision("state_changed"));
+  }
+  const trustedIds = initialAuthority.childIds;
   if (
-    registryIncomplete(
-      initialView,
-      cwd,
-      authorityEntries,
-      scope,
-      owner,
-      sessionId,
-    )
+    registryIncomplete(initialView, trustedIds, scope, owner, sessionId) ||
+    (initialCandidates.length === 0 &&
+      hasUncertainRoutingOwner(
+        initialView,
+        trustedIds,
+        scope,
+        owner,
+        sessionId,
+      ))
   ) {
     return routingAdviceResult(errorDecision("incomplete_registry"));
   }
-  if (initialCandidates.length === 0) {
+  const assessSplit = split && params.params.part !== true;
+  if (initialCandidates.length === 0 && !assessSplit) {
     return routingAdviceResult({
       kind: "no_match",
       reason: "new_child_recommended",
@@ -251,7 +322,8 @@ async function resolveOrchestratorRoute(params: {
     view: entry.view,
   }));
   const input = {
-    task,
+    ...(assessSplit ? { assessSplit } : {}),
+    task: description,
     candidates: snapshots.map(({ candidate }) => candidate),
   };
 
@@ -282,7 +354,7 @@ async function resolveOrchestratorRoute(params: {
     return routingAdviceResult({ kind: "cancelled" });
   }
 
-  decision = sanitizeDecision(engineDecision, snapshots);
+  decision = sanitizeDecision(engineDecision, snapshots, assessSplit);
   if (decision.kind === "cancelled") {
     return routingAdviceResult(decision);
   }
@@ -294,10 +366,12 @@ async function resolveOrchestratorRoute(params: {
   let authorityUnchanged: boolean;
   try {
     const currentAuthorityEntries = parentBranchEntries(params.ctx);
-    const authoritySnapshot = routingAuthoritySnapshot(
-      cwd,
-      currentAuthorityEntries,
-    );
+    if (
+      initialAuthority.digest !==
+      routingAuthoritySnapshot(cwd, currentAuthorityEntries).digest
+    ) {
+      return routingAdviceResult(errorDecision("state_changed"));
+    }
     currentView = await loadOrchestratorAgentRegistryView(
       cwd,
       scope.interactiveStates,
@@ -306,10 +380,10 @@ async function resolveOrchestratorRoute(params: {
         authorityEntries: currentAuthorityEntries,
       },
     );
-    // Liveness probes yield; the authority captured by the view may now be stale.
+    // Liveness probes yield; recheck the same authority after the projection.
     authorityUnchanged =
-      authoritySnapshot ===
-      routingAuthoritySnapshot(cwd, parentBranchEntries(params.ctx));
+      initialAuthority.digest ===
+      routingAuthoritySnapshot(cwd, parentBranchEntries(params.ctx)).digest;
   } catch {
     if (params.signal?.aborted) {
       return routingAdviceResult({ kind: "cancelled" });
@@ -336,14 +410,20 @@ async function resolveOrchestratorRoute(params: {
     !snapshotsMatchCurrentView(
       snapshots,
       currentView,
-      cwd,
-      parentBranchEntries(params.ctx),
+      trustedIds,
       scope,
       owner,
       sessionId,
     )
   ) {
     return routingAdviceResult(errorDecision("state_changed"));
+  }
+  if (
+    decision.kind === "no_match" &&
+    decision.reason === "new_child_recommended" &&
+    hasUncertainRoutingOwner(currentView, trustedIds, scope, owner, sessionId)
+  ) {
+    return routingAdviceResult(errorDecision("incomplete_registry"));
   }
 
   return routingAdviceResult(decision);
@@ -352,10 +432,16 @@ async function resolveOrchestratorRoute(params: {
 function routingAuthoritySnapshot(
   cwd: string,
   authorityEntries: readonly unknown[],
-): string {
-  const records = listOrchestratorRoutingEntries(cwd, authorityEntries);
+): { digest: string; childIds: string[] } {
+  const records = listOrchestratorRoutingAuthorityEntries(
+    cwd,
+    authorityEntries,
+  );
   records.sort((left, right) => left.childId.localeCompare(right.childId));
-  return JSON.stringify(records);
+  return {
+    digest: JSON.stringify(records),
+    childIds: records.map(({ childId }) => childId),
+  };
 }
 
 function contextCwd(ctx: unknown, scope: SessionScope): string | undefined {
@@ -438,13 +524,7 @@ function eligibleCandidates(
       continue;
     }
     const state = scope.interactiveStates.get(agent.childId);
-    if (!state || !directRuntimeBelongsToScope(state, owner, sessionId)) {
-      continue;
-    }
-    if (
-      state.workflowId !== undefined ||
-      state.completionOwner === "workflow"
-    ) {
+    if (!state || !isStandaloneRoutingRuntime(state, owner, sessionId)) {
       continue;
     }
     const candidate: RoutingCandidate = {
@@ -493,32 +573,55 @@ function directRuntimeBelongsToScope(
   );
 }
 
+function isStandaloneRoutingRuntime(
+  state: InteractiveSubagentState,
+  owner: ReturnType<typeof sessionOwner>,
+  sessionId: string | undefined,
+): boolean {
+  return (
+    state.workflowId === undefined &&
+    state.completionOwner !== "workflow" &&
+    directRuntimeBelongsToScope(state, owner, sessionId)
+  );
+}
+
 function registryIncomplete(
   view: OrchestratorAgentRegistryView,
-  cwd: string,
-  authorityEntries: readonly unknown[],
+  trustedIds: readonly string[],
   scope: SessionScope,
   owner: ReturnType<typeof sessionOwner>,
   sessionId: string | undefined,
 ): boolean {
   if (view.omitted <= 0) return false;
-  let trustedIds: string[];
-  try {
-    trustedIds = listOrchestratorRoutingEntries(cwd, authorityEntries).map(
-      (entry) => entry.childId,
-    );
-  } catch {
-    return true;
-  }
   const represented = new Set(view.agents.map((agent) => agent.childId));
   return trustedIds.some((childId) => {
     if (represented.has(childId)) return false;
     const state = scope.interactiveStates.get(childId);
-    if (!state || !directRuntimeBelongsToScope(state, owner, sessionId)) {
-      return false;
-    }
     return (
-      state.workflowId === undefined && state.completionOwner !== "workflow"
+      state !== undefined && isStandaloneRoutingRuntime(state, owner, sessionId)
+    );
+  });
+}
+
+function hasUncertainRoutingOwner(
+  view: OrchestratorAgentRegistryView,
+  trustedIds: readonly string[],
+  scope: SessionScope,
+  owner: ReturnType<typeof sessionOwner>,
+  sessionId: string | undefined,
+): boolean {
+  const represented = new Map(
+    view.agents.map((agent) => [agent.childId, agent]),
+  );
+  return trustedIds.some((childId) => {
+    const state = scope.interactiveStates.get(childId);
+    if (!state) return true;
+    if (!isStandaloneRoutingRuntime(state, owner, sessionId)) return false;
+    const agent = represented.get(childId);
+    if (!agent || agent.stale) return true;
+    return (
+      agent.reason === "pane_liveness_unknown" ||
+      agent.reason === "runtime_status_unknown"
     );
   });
 }
@@ -526,22 +629,12 @@ function registryIncomplete(
 function snapshotsMatchCurrentView(
   snapshots: readonly CandidateSnapshot[],
   currentView: OrchestratorAgentRegistryView,
-  cwd: string,
-  authorityEntries: readonly unknown[],
+  trustedIds: readonly string[],
   scope: SessionScope,
   owner: ReturnType<typeof sessionOwner>,
   sessionId: string | undefined,
 ): boolean {
-  if (
-    registryIncomplete(
-      currentView,
-      cwd,
-      authorityEntries,
-      scope,
-      owner,
-      sessionId,
-    )
-  ) {
+  if (registryIncomplete(currentView, trustedIds, scope, owner, sessionId)) {
     return false;
   }
   const current = eligibleCandidates(currentView, scope, owner, sessionId);
@@ -678,6 +771,7 @@ function sameUserRequest(
 function sanitizeDecision(
   value: unknown,
   snapshots: readonly CandidateSnapshot[],
+  assessSplit: boolean,
 ): RoutingDecision {
   const candidateIds = new Set(
     snapshots.map(({ candidate }) => candidate.childId),
@@ -688,6 +782,8 @@ function sanitizeDecision(
   const raw = value as Record<string, unknown>;
   if (raw.kind === "cancelled") return { kind: "cancelled" };
   const evidence = safeEvidence(raw.evidence);
+  if (raw.kind === "split_needed" && assessSplit && evidence)
+    return { kind: "split_needed", evidence };
   if (raw.kind === "match") {
     if (
       typeof raw.childId !== "string" ||
@@ -762,15 +858,17 @@ function routingAdviceResult(decision: RoutingDecision): {
   details: { status: "advice"; decision: RoutingDecision };
 } {
   const text =
-    decision.kind === "match"
-      ? `Routing advisor selected existing child ${decision.childId}.`
-      : decision.kind === "no_match"
-        ? decision.reason === "new_child_recommended"
-          ? "Routing advisor recommends creating a new child for this task; this is advice only."
-          : `Routing advisor abstained (${decision.reason}).`
-        : decision.kind === "cancelled"
-          ? "Routing advisor cancelled this routing request."
-          : `Routing advisor could not decide (${decision.reason}).`;
+    decision.kind === "split_needed"
+      ? "Separate the independent parts. Resolve each part with part=true and its own safe routingDescription. If no safe description is sufficient, abstain for that part. Send only the authorized part to its owner, not the combined request."
+      : decision.kind === "match"
+        ? `Routing advisor selected existing child ${decision.childId}.`
+        : decision.kind === "no_match"
+          ? decision.reason === "new_child_recommended"
+            ? "Routing advisor recommends creating a new child for this task; this is advice only."
+            : `Routing advisor abstained (${decision.reason}).`
+          : decision.kind === "cancelled"
+            ? "Routing advisor cancelled this routing request."
+            : `Routing advisor could not decide (${decision.reason}).`;
   return {
     content: [{ type: "text", text: `${text}\n${JSON.stringify(decision)}` }],
     details: { status: "advice", decision },

@@ -220,17 +220,17 @@ describe("Jev advisor in a real Pi session", () => {
     },
   );
 
-  it.skipIf(!("classify" in ModelRegistry.prototype))(
-    "registers exactly once after late flag binding and reload with native auth",
-    async () => {
-      vi.stubEnv("PI_ORCHESTRATOR_ROUTER", "jev");
+  it.skipIf(!("classify" in ModelRegistry.prototype)).each([false, true])(
+    "registers exactly once after late flag binding and reload with force=%s",
+    async (force) => {
+      vi.stubEnv("PI_ORCHESTRATOR_ROUTER", force ? undefined : "jev");
       vi.stubEnv("OPENROUTER_API_KEY", "synthetic-test-key");
       const fetch = vi.fn().mockRejectedValue(new Error("unexpected network"));
       vi.stubGlobal("fetch", fetch);
       cwd = mkdtempSync(join(tmpdir(), "pi-jev-enabled-"));
       harness = await createPiSessionHarness(cwd, {
         extensionRoot,
-        extensionFlags: { orchestratorv2: true },
+        extensionFlags: { orchestratorv2: true, "force-jev": force },
         bindExtensionLifecycle: true,
         includeTools: true,
       });
@@ -281,7 +281,7 @@ describe("Jev advisor in a real Pi session", () => {
     cwd = mkdtempSync(join(tmpdir(), "pi-jev-legacy-"));
     harness = await createPiSessionHarness(cwd, {
       extensionRoot,
-      extensionFlags: { orchestrator: true },
+      extensionFlags: { orchestrator: true, "force-jev": true },
       bindExtensionLifecycle: true,
       includeTools: true,
     });
