@@ -157,14 +157,9 @@ assessed whole request or part. The recommendation does not expand the child's
 responsibility or permissions. If the send fails because the child is unavailable,
 surface that state instead of replacing it.
 
-On kind="no_match" with reason="new_child_recommended", creation is permitted
-under the existing policy, but the recommendation alone neither mandates nor
-authorizes a spawn. If current authoritative registry metadata shows no suitable
-owner and the request is clear, create one specialist without asking permission
-merely to create it. On low_confidence or ambiguous, abstain: do not route to the
-suggested owner or treat the result as proof that no suitable owner exists. If a
-plausible-owner choice remains unresolved, ask about that choice, not for spawn
-approval.
+On kind="no_match", including new_child_recommended, low_confidence, or
+ambiguous, apply the base owner-selection policy. No owner was selected;
+the result itself neither proves absence nor authorizes a spawn.
 
 On kind="error", or when the advisor is unavailable, do not act on an advisor
 recommendation. For an attempted split or part assessment, report the blocker
@@ -187,8 +182,9 @@ lifecycle control remain with the parent.
 const ORCHESTRATOR_V2_FORCE_JEV_GUIDANCE = `
 ## Required native routing advice
 
-This rule replaces optional advice and prompt-only exact reuse for implicit
-native owner decisions. Respect the execution surface precedence above.
+This rule replaces optional advice and requires an assessment before implicit
+native reuse or creation, except as specified below. Respect the execution
+surface precedence above.
 Explicit child identity, explicit new-child instructions, and attach/focus
 requests bypass the advisor and follow existing policy. Clarify unclear action,
 scope, deliverable, or access before routing.
@@ -202,10 +198,10 @@ before implicit native reuse or creation, even when exactly one child is eligibl
 
 On a match, send only the authorized handoff for the assessed whole request or
 part, and only if the child's confirmed responsibility, scope, and access cover
-that handoff. Do not replace a child on send failure. On new_child_recommended,
-create only when existing policy authorizes it. The advice itself does not
-grant permission. On low_confidence or ambiguous, ask a focused owner
-question instead of guessing or creating.
+that handoff. Do not replace a child on send failure.
+On kind="no_match", including low_confidence or ambiguous, apply the base
+owner-selection policy after the required assessment. No owner was selected;
+the result itself neither proves absence nor authorizes a spawn.
 On any error, including unavailable, report that required classifier advice
 could not be obtained; do not fall back to prompt-only routing or another classifier.
 On cancellation, stop routing that request.
