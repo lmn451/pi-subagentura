@@ -181,7 +181,7 @@ export function readActiveTurn(
   try {
     fd = openSync(
       activeTurnPath(art),
-      constants.O_RDONLY | constants.O_NOFOLLOW,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
     const metadata = fstatSync(fd);
     if (!metadata.isFile() || metadata.size > MAX_ACTIVE_TURN_BYTES) {
