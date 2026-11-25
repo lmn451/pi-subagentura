@@ -527,7 +527,13 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       "Never route a low-confidence or ambiguous recommendation as a match",
     );
     expect(promptResult.systemPrompt).toContain(
-      "ask a focused question about the plausible owners",
+      "Ask a focused owner question only if two or more current owners remain plausible and the choice is unresolved",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "the advisor selected no owner; do not treat that result as proof of absence",
+    );
+    expect(promptResult.systemPrompt).toContain(
+      "create exactly one specialist without asking for creation approval",
     );
     expect(toolNames).not.toContain("resolve_orchestrator_route");
     expect(mockLaunchInteractiveSubagent).toHaveBeenCalledTimes(2);
@@ -651,6 +657,9 @@ describe("Orchestratorv2 thin-router scenarios", () => {
     expect(systemPrompt).toContain("## Required native routing advice");
     expect(systemPrompt).toContain("even when exactly one child is eligible");
     expect(systemPrompt).toContain("do not fall back to prompt-only routing");
+    expect(systemPrompt.replace(/\s+/g, " ")).toContain(
+      'On kind="no_match", including low_confidence or ambiguous, apply the base owner-selection policy after the required assessment.',
+    );
     expect(systemPrompt).toContain(
       "Explicit child identity, explicit new-child instructions, and attach/focus",
     );

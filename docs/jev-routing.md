@@ -70,11 +70,11 @@ attach/focus, unclear requests, and host-managed routing follow existing policy.
 In forced mode, the advisor stays registered even if Pi cannot use the
 configured classifier. If a decision needs classification and the classifier
 is unavailable, the tool returns `unavailable`. Report the blocker instead of
-using another classifier or falling back to prompt-only routing. On
-`low_confidence` or `ambiguous`, ask a focused question about the owner. Do not
-treat stale or unknown ownership as proof that no owner exists. On
+using another classifier or falling back to prompt-only routing. A successful
+`no_match`, including `low_confidence` or `ambiguous`, completes the required
+assessment without selecting an owner. Apply the owner-selection rule below.
+Do not treat stale, unknown, or incomplete ownership as proof of absence. On
 `state_changed`, recheck current authority before making a new decision.
-None of these outcomes authorizes a spawn.
 
 The advisor validates input shape, bounds, and classifier results. The parent
 model's choice to call or bypass it, describe the work safely, split, or dispatch
@@ -181,38 +181,39 @@ assessment, follow the stricter call and error rules for that mode.
    the returned `childId` through `send_interactive_subagent_message`. The
    handoff is separate from the classifier description. A match does not expand
    the owner's responsibility or permissions.
-4. On `kind: "no_match", reason: "new_child_recommended"`, creation is permitted
-   under the existing policy but is not mandatory. If current authoritative
-   metadata shows no suitable owner and the request clearly states its action,
-   target/scope, deliverable, and access, create one specialist without asking
-   merely for creation approval. This includes narrow read-only investigation;
-   “look at this issue” means inspect and report, not implement.
-5. On `low_confidence` or `ambiguous`, do not route a recommendation as a match
-   or treat it as evidence that no suitable owner exists. If a plausible-owner
-   choice remains unresolved, ask a focused question about that choice, not
-   whether to create a specialist. On `error`, or if the advisor is unavailable,
-   use current authoritative registry metadata and the base policy; a clear
-   request with no suitable owner may proceed without a redundant approval
-   prompt. Never follow an erroneous recommendation. On `kind: "cancelled"`,
-   stop routing the request.
+4. On `kind: "no_match"` (`new_child_recommended`, `low_confidence`, or
+   `ambiguous`), the advisor selected no owner. Do not treat the result as a
+   match or proof of absence. Use current authoritative metadata: reuse an
+   unambiguous, exact, live, authorized owner. Ask which owner to use only if
+   two or more current owners remain plausible and the choice is unresolved.
+   If complete discovery establishes that no suitable exact owner exists and
+   there is no unresolved choice, create exactly one specialist for the clear
+   request without asking for approval. This includes narrow read-only
+   investigation; “look at this issue” means inspect and report, not implement.
+5. On `error`, or if the advisor is unavailable, use current authoritative
+   registry metadata and the base policy for unsplit optional advice. Never
+   follow an erroneous recommendation. On `kind: "cancelled"`, stop routing
+   the request.
 
 ### Whole-first flow with `--split`
 
 With an applicable advisor (optional or forced), assess a clear implicit
 native request **before splitting or dispatching**. Call with a safe
 `routingDescription` of the whole request and leave `part` unset. Even with
-zero eligible children, this assessment offers `split` and `none`. `none`
-means no suitable existing child; a match or `new_child_recommended` at this
-stage means one handoff, not a split, and only if existing policy authorizes it.
+zero eligible children, this assessment offers `split` and `none`. A
+whole-request match gives one handoff to an authorized owner. On `no_match`,
+apply the owner-selection rule to the whole request: if reliable discovery
+establishes no suitable owner, create one specialist, not a split.
 
 Only on `split_needed`, separate the distinct authorized parts. Call once per
 part with `part: true` and its own safe `routingDescription`, never the
 combined description. A part offers candidate choices and `none`, not
 `split`. An empty complete eligible registry for a part needs no classifier
-request. Send or assign only the assessed part to its authorized child. Do not
-send another part's work material. Do not infer a split, a match, or permission
-to create from an error or weak advice. If the whole or a part cannot be safely
-described, take the no-call path below.
+request. Send or assign only the assessed part to its authorized child. Use
+the same owner-selection rule for each part on `no_match`; do not split a
+part again. Do not infer a split or handoff from an error or unavailable
+result. If the whole or a part cannot be safely described, take the no-call
+path below.
 
 For example, suppose the user asks for two read-only reviews and supplies an
 internal compatibility matrix and draft release notes. With
@@ -253,10 +254,10 @@ rules to decompose broad requests into independent handoffs. The advisor never
 applies to explicitly selected targets, explicit new-child requests, attach
 or focus, or host-managed routing.
 
-Apart from the privacy recovery path below, ask for clarification only when a
-substantive request requirement or permission remains unclear, such as target,
-deliverable, read/write/PR scope, or continuation versus new work. Do not
-expand read-only/reviewer permissions. Aliases remain discovery hints.
+Apart from the owner-selection and privacy rules, ask for clarification only
+when a substantive request requirement or permission remains unclear, such as
+target, deliverable, read/write/PR scope, or continuation versus new work.
+Do not expand read-only/reviewer permissions. Aliases remain discovery hints.
 
 The advisor builds candidates from the current parent session's authority and
 runtime state, not a model-supplied list. Only live, actionable, non-stale direct

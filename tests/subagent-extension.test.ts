@@ -251,7 +251,7 @@ describe("extension registration", () => {
       "An exact or continuation match is not routable",
     );
     expect(result.systemPrompt).toContain(
-      "Do not ask the user for permission merely to create that specialist",
+      "create exactly one specialist without asking for creation approval",
     );
     expect(result.systemPrompt).not.toContain(
       "Without an applicable native routing advisor, decompose broad requests",
@@ -481,11 +481,7 @@ describe("extension registration", () => {
     );
     for (const policy of [
       'On kind="match"',
-      'On kind="no_match" with reason="new_child_recommended"',
-      "creation is permitted under the existing policy",
-      "the recommendation alone neither mandates nor authorizes a spawn",
-      "On low_confidence or ambiguous, abstain",
-      "do not route to the suggested owner",
+      'On kind="no_match", including new_child_recommended, low_confidence, or ambiguous, apply the base owner-selection policy.',
       'On kind="error", or when the advisor is unavailable',
       "current authoritative registry metadata",
       "without a redundant approval prompt",

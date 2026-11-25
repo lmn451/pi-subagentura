@@ -150,6 +150,14 @@ describe("validateSchema array cardinality", () => {
   });
 });
 
+describe("validateSchema finite numbers", () => {
+  it.each(["1e400", "-1e400"])("rejects numeric overflow %s", (json) => {
+    expect(validateSchema(JSON.parse(json), { type: "number" })).toEqual([
+      expect.stringMatching(/^\$: .*(?:finite|overflow|infinity)/i),
+    ]);
+  });
+});
+
 describe("workflow schema preflight", () => {
   it.each([
     {
@@ -183,6 +191,36 @@ describe("workflow schema preflight", () => {
 });
 
 describe("workflow schema retries", () => {
+  it("rejects nested numeric overflow in process-agent JSON with a path-specific schema error", async () => {
+    const prompts: string[] = [];
+    const result = await runWorkflow(
+      `export const meta = { name: "finite-numbers", description: "test" };
+       return await agent("return numeric values", {
+         isolation: "process",
+         schema: {
+           type: "object",
+           properties: { values: { type: "array", items: { type: "number" } } },
+         },
+       });`,
+      {
+        runAgent: async ({ prompt }) => {
+          prompts.push(prompt);
+          return ok('{"values":[1e400]}');
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      result: null,
+      errorCount: 1,
+      failure: { errorCategory: "schema", errorStage: "schema_validation" },
+    });
+    expect(prompts).toHaveLength(SCHEMA_RETRIES);
+    expect(prompts[1]).toMatch(
+      /\$\.values\[0\]: .*(?:finite|overflow|infinity)/i,
+    );
+  });
+
   it("retries after an additional property violation", async () => {
     let calls = 0;
     const script = `

@@ -31,11 +31,16 @@ Only on `split_needed`, separate the independent authorized parts. For each
 part, call the advisor with `part: true` and a distinct safe `routingDescription`
 for that part alone. Never split a part again. Send or assign only the approved
 part to its authorized child; do not send the combined request or another part's
-material. An empty eligible registry for a part needs no classifier request.
+material. A complete registry with no eligible children for a part needs no
+classifier request.
+
+On `no_match`, including `low_confidence` or `ambiguous`, apply the base
+owner-selection policy to the assessed whole request or part. When that policy
+calls for creation, create exactly one child for that scope without splitting.
 
 If a safe description cannot be formed, omit the advisor call and use the
-privacy recovery rule below, for the whole request or the affected part. Do not
-guess a split or handoff from an error, unavailable result, or abstention.
+privacy recovery rule below, for the whole request or the affected part.
+Do not guess a split or handoff from an error or unavailable result.
 Report the blocker, or ask a focused question when user input can resolve it.
 On cancellation, stop routing that request.
 

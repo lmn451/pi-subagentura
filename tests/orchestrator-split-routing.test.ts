@@ -190,6 +190,12 @@ describe("composed native split and privacy guidance", () => {
       expect(prompt).toContain("even with zero eligible children");
       expect(prompt).toContain("a single handoff, not a split");
       expect(prompt).toContain("Never split a part again");
+      expect(prompt).toContain(
+        "On `no_match`, including `low_confidence` or `ambiguous`, apply the base owner-selection policy to the assessed whole request or part. When that policy calls for creation, create exactly one child for that scope without splitting.",
+      );
+      expect(prompt).toContain(
+        "Do not guess a split or handoff from an error or unavailable result.",
+      );
       if (mode === "plain") {
         expect(tool(advisor)).toBeUndefined();
         return;

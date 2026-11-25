@@ -58,6 +58,7 @@ import {
   type Usage,
 } from "../src/helpers";
 import {
+  MAX_OUTPUT_SNAPSHOT_BYTES,
   appendCompletionEvent,
   appendEvent,
   artifactPath,
@@ -576,6 +577,26 @@ describe("agent() + budget", () => {
     });
   });
 
+  it("rejects a negative budget at the workflow runner boundary", async () => {
+    const run = runWorkflow(meta + `return budget.total;`, {
+      budgetTotal: -1,
+      runAgent: echoRunner(),
+      workflowTimeoutMs: 250,
+    });
+    await expect(run).rejects.toThrow(/budget/i);
+    await expect(run).rejects.not.toThrow(/timed out|timeout/i);
+  });
+
+  it("allows a zero budget for a workflow without agent calls", async () => {
+    await expect(
+      runWorkflow(meta + `return budget.total;`, {
+        budgetTotal: 0,
+        runAgent: echoRunner(),
+        workflowTimeoutMs: 2000,
+      }),
+    ).resolves.toMatchObject({ result: 0, agentsSpawned: 0 });
+  });
+
   it("waits for unawaited agent work before completing", async () => {
     let release!: () => void;
     let started!: () => void;
@@ -717,6 +738,19 @@ describe("agent() + budget", () => {
     );
 
     expect(seenIsolation).toBe("in-process");
+  });
+
+  it("does not dispatch a misspelled isolation option to the agent runner", async () => {
+    const runAgent = vi.fn(echoRunner());
+    const result = await runWorkflow(
+      meta +
+        `try { return await agent("hello", { isolation: "in-proces" }); } ` +
+        `catch { return null; }`,
+      { runAgent, workflowTimeoutMs: 2000 },
+    );
+
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(result.result).toBeNull();
   });
 
   it("inherits phases per workflow body without leaking nested phases", async () => {
@@ -2100,33 +2134,50 @@ describe("awaitInteractiveResult", () => {
     expect(res.output).toBe("v2 final answer");
   });
 
-  it("does not fall back to mutable output for a rejected v2 snapshot", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "wf-int-"));
-    writeFileSync(join(dir, "output.md"), "untrusted staging output");
-    writeFileSync(
-      join(dir, "events.ndjson"),
-      JSON.stringify({
-        version: 2,
-        eventId: "event-v2-oversized",
-        turnId: "turn-v2-oversized",
-        ts: 2,
-        type: "completion",
-        status: "done",
-        outcome: "done",
-        source: "explicit",
-        outputError: {
-          code: "output_too_large",
-          bytes: 1_048_577,
-          maxBytes: 1_048_576,
-        },
-      }) + "\n",
-    );
+  it.each([
+    {
+      kind: "rejected oversized",
+      bytes: MAX_OUTPUT_SNAPSHOT_BYTES + 1,
+      snapshot: { outputError: { code: "output_too_large" } },
+      expected: { result: null, errorCount: 1 },
+    },
+    {
+      kind: "valid empty",
+      bytes: 0,
+      snapshot: { output: { bytes: 0 } },
+      expected: { result: "", errorCount: 0 },
+    },
+  ])(
+    "handles a $kind process-agent snapshot without using mutable output",
+    async ({ bytes, snapshot, expected }) => {
+      const dir = mkdtempSync(join(tmpdir(), "wf-int-"));
+      const art = artifactPath(dir, "artifact");
+      try {
+        writeOutput(art, "x".repeat(bytes));
+        const completion = appendCompletionEvent(art, {
+          turnId: "turn-v2",
+          outcome: "done",
+          source: "explicit",
+        });
+        expect(completion).toMatchObject(snapshot);
+        writeOutput(art, "untrusted staging output");
 
-    const res = await awaitInteractiveResult(fakeState(dir), undefined, 5);
+        const run = await runWorkflow(
+          `export const meta = { name: "snapshot", description: "d" };
+           return await agent("return output", { isolation: "process" });`,
+          {
+            runAgent: ({ signal }) =>
+              awaitInteractiveResult(fakeState(art.dir), signal, 5),
+            workflowTimeoutMs: 2000,
+          },
+        );
 
-    expect(res.isError).toBe(false);
-    expect(res.output).toBe("(no output)");
-  });
+        expect(run).toMatchObject({ agentsSpawned: 1, ...expected });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("returns an error result for a protocol-v2 error completion", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wf-int-"));
@@ -2660,6 +2711,56 @@ describe("renderProgress", () => {
 });
 
 describe("registerWorkflowTool", () => {
+  function getWorkflowTool() {
+    const tools: any[] = [];
+    const pi = {
+      registerTool: vi.fn((def: any) => tools.push(def)),
+      registerCommand: vi.fn(),
+    };
+    registerWorkflowTool(pi as any, workflowScope);
+    return tools.find((tool) => tool.name === "workflow")!;
+  }
+
+  it.each([
+    [-1, false],
+    [0, true],
+  ] as const)(
+    "validates budget %d at tool admission before any job can start",
+    (budget, accepted) => {
+      const workflowTool = getWorkflowTool();
+      const script =
+        `export const meta = { name: "tool-budget", description: "d" }; ` +
+        `return budget.total;`;
+
+      expect(Value.Check(workflowTool.parameters, { script, budget })).toBe(
+        accepted,
+      );
+    },
+  );
+
+  it("completes a synchronous workflow with no explicit return", async () => {
+    const result = await getWorkflowTool().execute(
+      "",
+      {
+        script:
+          `export const meta = { name: "no-return", description: "d" }; ` +
+          `phase("working"); log("finished");`,
+        async: false,
+      },
+      undefined,
+      undefined,
+      { cwd: "/tmp/tool-context", modelRegistry: {} },
+    );
+
+    expect({
+      status: result.details.status,
+      isError: result.isError ?? false,
+      error: result.details.error,
+    }).toEqual({ status: "done", isError: false, error: undefined });
+    expect(result.content[0].text).toContain('Workflow "no-return" complete');
+    expect(result.details.errorCount).toBe(0);
+  });
+
   it("registers 6 tools with the Pi SDK", () => {
     const tools: Array<{ name: string }> = [];
     const pi = {
