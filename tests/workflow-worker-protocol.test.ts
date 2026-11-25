@@ -1,6 +1,7 @@
 import { once } from "node:events";
 import { Worker } from "node:worker_threads";
 import { describe, expect, expectTypeOf, it } from "vitest";
+import type { WorkflowAgentOptions } from "pi-subagentura/workflow";
 import type { WorkflowAgentOpts } from "../src/workflow-core";
 import {
   isParentWorkerMessage,
@@ -41,6 +42,29 @@ describe("workflow RPC narrowing", () => {
   it("keeps lightweight worker options aligned with workflow options", () => {
     expectTypeOf<WorkerAgentOpts>().toEqualTypeOf<WorkflowAgentOpts>();
   });
+
+  it("accepts only published isolation literals or an omitted option over RPC", () => {
+    type Isolation = NonNullable<WorkflowAgentOptions["isolation"]>;
+    const validOptions = { process: true, "in-process": true } satisfies Record<
+      Isolation,
+      true
+    >;
+    const request = (opts: unknown) => ({
+      id: 1,
+      method: "agent",
+      payload: { prompt: "literal", opts },
+    });
+
+    expect(isWorkerParentMessage(request({}))).toBe(true);
+    for (const isolation of Object.keys(validOptions)) {
+      expect(isWorkerParentMessage(request({ isolation }))).toBe(true);
+    }
+    expectTypeOf<"in-proces">().not.toExtend<Isolation>();
+    expect(isWorkerParentMessage(request({ isolation: "in-proces" }))).toBe(
+      false,
+    );
+  });
+
   it.each([
     null,
     [],

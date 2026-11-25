@@ -150,6 +150,21 @@ describe("validateSchema array cardinality", () => {
   });
 });
 
+describe("validateSchema finite numbers", () => {
+  it.each(["1e400", "-1e400"])("rejects numeric overflow %s", (json) => {
+    expect(validateSchema(JSON.parse(json), { type: "number" })).toEqual([
+      expect.stringMatching(/^\$: .*(?:finite|overflow|infinity)/i),
+    ]);
+  });
+
+  it("rejects non-finite numbers outside declared properties and items", () => {
+    const value = JSON.parse('{"extra":[0,{"value":-1e400}]}');
+    expect(validateSchema(value, { type: "object" })).toEqual([
+      expect.stringMatching(/^\$\.extra\[1\]\.value: .*finite/i),
+    ]);
+  });
+});
+
 describe("workflow schema preflight", () => {
   it.each([
     {
@@ -183,6 +198,48 @@ describe("workflow schema preflight", () => {
 });
 
 describe("workflow schema retries", () => {
+  it.each(["process", "in-process"] as const)(
+    "rejects nested numeric overflow in %s results with a path-specific schema error",
+    async (isolation) => {
+      const prompts: string[] = [];
+      const result = await runWorkflow(
+        `export const meta = { name: "finite-numbers", description: "test" };
+         return await agent("return numeric values", {
+           isolation: ${JSON.stringify(isolation)},
+           schema: {
+             type: "object",
+             properties: { values: { type: "array", items: { type: "number" } } },
+           },
+         });`,
+        {
+          runAgent: async ({ prompt }) => {
+            prompts.push(prompt);
+            const output = '{"values":[1e400]}';
+            return isolation === "process"
+              ? ok(output)
+              : {
+                  ...ok(""),
+                  workflowStructuredOutput: {
+                    called: true,
+                    value: JSON.parse(output),
+                  },
+                };
+          },
+        },
+      );
+
+      expect(result).toMatchObject({
+        result: null,
+        errorCount: 1,
+        failure: { errorCategory: "schema", errorStage: "schema_validation" },
+      });
+      expect(prompts).toHaveLength(SCHEMA_RETRIES);
+      expect(prompts[1]).toMatch(
+        /\$\.values\[0\]: .*(?:finite|overflow|infinity)/i,
+      );
+    },
+  );
+
   it("retries after an additional property violation", async () => {
     let calls = 0;
     const script = `

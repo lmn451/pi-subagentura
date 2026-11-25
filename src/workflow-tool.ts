@@ -17,6 +17,7 @@ import {
   MAX_ITEMS_PER_CALL,
   INTERACTIVE_POLL_MS,
   MAX_TOTAL_AGENTS,
+  assertWorkflowBudget,
   listSavedWorkflows,
   loadWorkflowScript,
   parseWorkflow,
@@ -834,6 +835,7 @@ export function registerWorkflowTool(
       ),
       budget: Type.Optional(
         Type.Number({
+          minimum: 0,
           description:
             "Optional soft completed-output-token target; in-flight calls may overshoot it, especially in parallel.",
         }),
@@ -886,6 +888,7 @@ export function registerWorkflowTool(
 
       let completion: ResolvedCompletionPolicy;
       try {
+        if (params.budget !== undefined) assertWorkflowBudget(params.budget);
         completion =
           params.async === false
             ? { policy: "each" }

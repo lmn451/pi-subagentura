@@ -31,6 +31,12 @@ export const WORKFLOW_WALL_TIMEOUT_MS = 100 * 60 * 60_000;
 /** Finite high default; callers should pass lower explicit budgets when practical. */
 export const DEFAULT_WORKFLOW_OUTPUT_BUDGET = 100_000_000_000;
 
+export function assertWorkflowBudget(value: unknown): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error("Workflow budget must be a finite non-negative number.");
+  }
+}
+
 export function defaultConcurrency(): number {
   const n = cpus()?.length ?? 4;
   return Math.max(1, Math.min(16, n - 2));
@@ -262,7 +268,7 @@ export interface WorkflowAgentOpts {
   model?: string;
   persona?: string;
   /** Defaults to "process" (attachable multiplexer); use "in-process" to opt out. */
-  isolation?: string;
+  isolation?: "process" | "in-process";
   /** Accepted for fidelity but a no-op in v2. */
   agentType?: string;
   /** Thinking/reasoning level for the sub-agent. Clamped to model capabilities. */
@@ -583,8 +589,51 @@ export function validateSchema(
 ): string[] {
   const schemaErrors = validateSchemaDefinition(schema, path);
   if (schemaErrors.length > 0) return schemaErrors;
+  // Unconstrained properties and items must also survive JSON serialization.
+  const nonFinitePath = findNonFiniteNumberPath(value, path);
+  if (nonFinitePath !== undefined) {
+    return [`${nonFinitePath}: expected a finite number`];
+  }
+  return validateSchemaValue(value, schema, path);
+}
 
-  if (!schema || typeof schema !== "object") return [];
+function findNonFiniteNumberPath(
+  value: unknown,
+  path: string,
+): string | undefined {
+  const pending = [{ value, path }];
+  const visited = new WeakSet<object>();
+  while (pending.length > 0) {
+    const item = pending.pop()!;
+    if (typeof item.value === "number" && !Number.isFinite(item.value)) {
+      return item.path;
+    }
+    if (
+      item.value === null ||
+      typeof item.value !== "object" ||
+      visited.has(item.value)
+    ) {
+      continue;
+    }
+    visited.add(item.value);
+    const entries = Object.entries(item.value);
+    const array = Array.isArray(item.value);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const [key, child] = entries[i];
+      pending.push({
+        value: child,
+        path: array ? `${item.path}[${key}]` : `${item.path}.${key}`,
+      });
+    }
+  }
+  return undefined;
+}
+
+function validateSchemaValue(
+  value: unknown,
+  schema: any,
+  path: string,
+): string[] {
   const errs: string[] = [];
   const t = schema.type as string | string[] | undefined;
   if (t) {
@@ -618,7 +667,7 @@ export function validateSchema(
     }
     for (const [k, sub] of Object.entries(properties)) {
       if (Object.prototype.hasOwnProperty.call(obj, k)) {
-        errs.push(...validateSchema(obj[k], sub, `${path}.${k}`));
+        errs.push(...validateSchemaValue(obj[k], sub, `${path}.${k}`));
       }
     }
     if (schema.additionalProperties === false) {
@@ -643,7 +692,7 @@ export function validateSchema(
     }
     if (schema.items) {
       arr.forEach((el, idx) =>
-        errs.push(...validateSchema(el, schema.items, `${path}[${idx}]`)),
+        errs.push(...validateSchemaValue(el, schema.items, `${path}[${idx}]`)),
       );
     }
   }
@@ -781,7 +830,7 @@ function matchesType(v: unknown, ty: string): boolean {
     case "string":
       return typeof v === "string";
     case "number":
-      return typeof v === "number" && !Number.isNaN(v);
+      return typeof v === "number" && Number.isFinite(v);
     case "integer":
       return typeof v === "number" && Number.isInteger(v);
     case "boolean":

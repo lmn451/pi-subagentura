@@ -3,6 +3,7 @@ import { createContext, runInContext } from "node:vm";
 import {
   isParentWorkerMessage,
   isWorkerParentMessage,
+  isWorkflowAgentIsolation,
 } from "./workflow-rpc.mjs";
 import {
   makeGuardedDate,
@@ -141,6 +142,14 @@ async function executeBody(meta, body, args, depth) {
       checkAbort();
       if (typeof prompt !== "string" || prompt.trim() === "") {
         throw new Error("agent(prompt): prompt must be a non-empty string.");
+      }
+      if (
+        opts.isolation !== undefined &&
+        !isWorkflowAgentIsolation(opts.isolation)
+      ) {
+        throw new Error(
+          'agent(prompt): isolation must be "process" or "in-process".',
+        );
       }
       if (workerConfig.budgetTotal != null && budgetRemaining() <= 0) {
         throw new Error("Workflow token budget exhausted.");
