@@ -190,6 +190,12 @@ describe("composed native split and privacy guidance", () => {
       expect(prompt).toContain("even with zero eligible children");
       expect(prompt).toContain("a single handoff, not a split");
       expect(prompt).toContain("Never split a part again");
+      expect(prompt).toContain(
+        "On `no_match`, including `low_confidence` or `ambiguous`, apply the base owner-selection policy to the assessed whole request or part. When that policy calls for creation, create exactly one child for that scope without splitting.",
+      );
+      expect(prompt).toContain(
+        "Do not guess a split or handoff from an error or unavailable result.",
+      );
       if (mode === "plain") {
         expect(tool(advisor)).toBeUndefined();
         return;
@@ -266,7 +272,7 @@ describe("registered split advisor with a stub classifier", () => {
     );
     const result = await scenario.call(advisor, { routingDescription: whole });
     expect(result.details.decision).toMatchObject({
-      kind: "no_match",
+      kind: "split_uncertain",
       reason: "low_confidence",
     });
     expect(choices(scenario.modelRegistry)).toEqual([
@@ -469,3 +475,20 @@ describe("registered split advisor with a stub classifier", () => {
     expect(choices(modelRegistry, 1)).not.toContain("split");
   });
 });
+it.each(["optional", "forced"] as const)(
+  "asks about a narrow split decision with no children in %s mode",
+  async (mode) => {
+    const s = await setup(mode);
+    s.modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult("split", { split: 0.51, none: 0.49 }),
+    );
+    const result = await s.call(advisor, { routingDescription: whole });
+    expect(result.details.decision.kind).toBe("split_uncertain");
+    expect(result.content[0].text).toContain(
+      "Do not split, send, or create a child",
+    );
+    expect(s.prompt).toContain("On `split_uncertain`");
+    expect(send).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  },
+);

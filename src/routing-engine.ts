@@ -45,6 +45,11 @@ export type RoutingErrorReason =
   | "incomplete_registry";
 
 export type RoutingDecision =
+  | {
+      kind: "split_uncertain";
+      reason: "low_confidence" | "ambiguous";
+      evidence: RoutingEvidence;
+    }
   | { kind: "split_needed"; evidence: RoutingEvidence }
   | { kind: "match"; childId: string; evidence: RoutingEvidence }
   | {

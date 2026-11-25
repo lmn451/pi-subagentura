@@ -223,7 +223,7 @@ function nativeDecision(
   if (input.assessSplit && parsed.choice === "split") {
     const reason = routingEvidenceFailureReason(parsed.evidence, config.policy);
     return reason
-      ? { kind: "no_match", reason, evidence: parsed.evidence }
+      ? { kind: "split_uncertain", reason, evidence: parsed.evidence }
       : { kind: "split_needed", evidence: parsed.evidence };
   }
   const childId = input.candidates.find(
