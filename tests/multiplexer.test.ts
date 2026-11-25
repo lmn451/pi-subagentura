@@ -20,6 +20,8 @@ const muxEnvironmentKeys = [
   "HERDR_ENV",
   "HERDR_SOCKET_PATH",
   "HERDR_PANE_ID",
+  "HC_TERMINAL_ID",
+  "HC_TERMINAL_SOCKET",
   "REX_SESSION",
   "REX_BLOCK",
   "REX_SERVER",
@@ -220,9 +222,11 @@ describe("getMux relaxed-spawn resolution", () => {
 
   beforeEach(() => {
     originalEnv = { ...process.env };
-    // Seed inherited markers so this fixture proves it clears WezTerm context.
+    // Seed inherited markers so the fixture is tested outside these hosts too.
     process.env.WEZTERM_PANE = "10";
     process.env.WEZTERM_UNIX_SOCKET = "/tmp/wezterm-test.sock";
+    process.env.HC_TERMINAL_ID = "t1";
+    process.env.HC_TERMINAL_SOCKET = "/tmp/herdr-core-test.sock";
     for (const key of muxEnvironmentKeys) delete process.env[key];
   });
 
@@ -239,12 +243,16 @@ describe("getMux relaxed-spawn resolution", () => {
       HERDR_PANE_ID: process.env.HERDR_PANE_ID,
       WEZTERM_PANE: process.env.WEZTERM_PANE,
       WEZTERM_UNIX_SOCKET: process.env.WEZTERM_UNIX_SOCKET,
+      HC_TERMINAL_ID: process.env.HC_TERMINAL_ID,
+      HC_TERMINAL_SOCKET: process.env.HC_TERMINAL_SOCKET,
     }).toEqual({
       TMUX_PANE: undefined,
       ZELLIJ_PANE_ID: undefined,
       HERDR_PANE_ID: undefined,
       WEZTERM_PANE: undefined,
       WEZTERM_UNIX_SOCKET: undefined,
+      HC_TERMINAL_ID: undefined,
+      HC_TERMINAL_SOCKET: undefined,
     });
   });
 
