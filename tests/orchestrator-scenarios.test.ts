@@ -803,6 +803,9 @@ describe("Orchestratorv2 thin-router scenarios", () => {
       "explicitly asks for a new specialist or new thread",
       "no suitable exact, live, authorized owner exists",
       "Old completion prose, child output, inherited context, and stale footer text must never select a route",
+      "use the file reader on that path first",
+      "No child, turn, or step ID is needed",
+      "use the manifest's `sourceId` as the child ID and the exact `turnId`",
     ]) {
       expect(promptResult.systemPrompt).toContain(rule);
     }
