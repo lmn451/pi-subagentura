@@ -26,6 +26,10 @@ vi.mock("../src/interactive-tmux", async (importOriginal) => {
     ...actual,
     launchInteractiveSubagent: mockLaunchInteractiveSubagent,
     sendCommandToPane: mockSendCommandToPane,
+    sendInteractiveSubagentFollowup: async (state: unknown, prompt: string) => {
+      mockSendCommandToPane(state, prompt);
+      return { status: "sent" as const };
+    },
   };
 });
 
