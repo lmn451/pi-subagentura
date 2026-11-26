@@ -499,6 +499,7 @@ export interface WorkflowRunResult {
   tokensSpent: number;
   usage?: WorkflowUsage;
   phases: string[];
+  phasesOmitted?: number;
 }
 
 /** Result produced by `runWorkflow`; unlike the legacy boundary, usage is present. */
@@ -898,6 +899,18 @@ export function createSemaphore(max: number): Semaphore {
 }
 
 // ── Saved workflows ──────────────────────────────────────────────────
+
+/** Retain the latest phase titles for the result and live job view. */
+export function recordWorkflowPhase(
+  history: { phases: string[]; phasesOmitted?: number },
+  title: string,
+): void {
+  if (history.phases.length >= 100) {
+    history.phases.shift();
+    history.phasesOmitted = (history.phasesOmitted ?? 0) + 1;
+  }
+  history.phases.push(title);
+}
 
 export const WORKFLOWS_DIR = join(homedir(), ".pi-subagentura", "workflows");
 
