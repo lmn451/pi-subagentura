@@ -312,6 +312,14 @@ export function registerChildProtocol(
 ): void {
   const art = getArtifact(ownership);
   let startupAgentStarted = false;
+  let deferredBind: ReturnType<typeof setTimeout> | undefined;
+  const cancelDeferredBind = () => {
+    if (deferredBind !== undefined) {
+      clearTimeout(deferredBind);
+      deferredBind = undefined;
+    }
+  };
+  pi.on("session_shutdown", cancelDeferredBind);
   pi.on("session_start", (event, ctx) => {
     const model = ctx.model;
     if (event.reason !== "startup" || !model) return;
@@ -429,6 +437,7 @@ export function registerChildProtocol(
     );
   };
   pi.on("before_agent_start", (_event, ctx) => {
+    cancelDeferredBind();
     startupAgentStarted = true;
     const turn: ActiveTurn = {
       turnId: `turn-${newEventId()}`,
@@ -442,11 +451,12 @@ export function registerChildProtocol(
   });
 
   pi.on("turn_start", (event, ctx) => {
+    cancelDeferredBind();
     bindPersistedTurn(ctx, event.timestamp);
-    const deferredBind = setTimeout(
-      () => bindPersistedTurn(ctx, event.timestamp),
-      0,
-    );
+    deferredBind = setTimeout(() => {
+      deferredBind = undefined;
+      bindPersistedTurn(ctx, event.timestamp);
+    }, 0);
     deferredBind.unref();
   });
   // The first turn_start can precede persistence of the user message.
@@ -468,6 +478,8 @@ export function registerChildProtocol(
     latestAgentMessages = [...event.messages];
   });
   pi.on("agent_settled", (_event, ctx) => {
+    // Settlement performs the final bind before Pi can dispose this context.
+    cancelDeferredBind();
     const active = bindPersistedTurn(ctx, Date.now());
     if (!active) return;
     const assistant = [...latestAgentMessages]

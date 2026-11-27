@@ -431,3 +431,75 @@ describe("child protocol lifecycle", () => {
     expect(() => registerHandlers()).toThrow(/requires ARTIFACT_DIR/);
   });
 });
+
+describe("deferred child turn binding", () => {
+  it.each(["agent_settled", "session_shutdown", "before_agent_start"])(
+    "cancels a pending bind at %s before its context becomes stale",
+    (event) => {
+      const env = { ...process.env };
+      const root = mkdtempSync(join(tmpdir(), "pi-deferred-bind-"));
+      vi.useFakeTimers();
+      try {
+        process.env.ARTIFACT_DIR = join(root, "child");
+        const handlers = registerHandlers();
+        let stale = false;
+        let entries: any[] = [];
+        const ctx = {
+          get sessionManager() {
+            if (stale) throw new Error("stale extension context");
+            return { getEntries: () => entries };
+          },
+        };
+        handlers.get("before_agent_start")!({}, ctx);
+        handlers.get("turn_start")!({ timestamp: 100 }, ctx);
+        entries = [
+          { id: "persisted-user", type: "message", message: { role: "user" } },
+        ];
+        handlers.get(event)!({}, ctx);
+        stale = true;
+        expect(vi.getTimerCount()).toBe(0);
+        expect(() => vi.runAllTimers()).not.toThrow();
+        if (event === "agent_settled") {
+          expect(readEvents(artifactPath(root, "child"))).toMatchObject([
+            { type: "turn_started", turnId: "persisted-user" },
+            { type: "completion", turnId: "persisted-user", outcome: "done" },
+          ]);
+        }
+      } finally {
+        vi.useRealTimers();
+        process.env = env;
+        resetRuntimeChildArtifactOwnershipForTests();
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("still binds a user entry persisted after turn_start while the run is active", () => {
+    const env = { ...process.env };
+    const root = mkdtempSync(join(tmpdir(), "pi-deferred-bind-"));
+    vi.useFakeTimers();
+    try {
+      process.env.ARTIFACT_DIR = join(root, "child");
+      const handlers = registerHandlers();
+      let entries: any[] = [];
+      const ctx = { sessionManager: { getEntries: () => entries } };
+      handlers.get("before_agent_start")!({}, ctx);
+      handlers.get("turn_start")!({ timestamp: 100 }, ctx);
+      expect(readActiveTurn()?.started).toBe(false);
+      entries = [
+        { id: "delayed-user", type: "message", message: { role: "user" } },
+      ];
+      vi.runAllTimers();
+      expect(readActiveTurn()).toMatchObject({
+        turnId: "delayed-user",
+        started: true,
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      process.env = env;
+      resetRuntimeChildArtifactOwnershipForTests();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
