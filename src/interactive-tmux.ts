@@ -51,6 +51,10 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { CLI_SOURCE } from "./subagent-artifact-cli";
 import {
+  initializeCompletionLockProtocol,
+  readCompletionLockProtocol,
+} from "./completion-writer-lock.mjs";
+import {
   appendInteractiveState,
   appendCompletionEvent,
   artifactPath,
@@ -847,7 +851,9 @@ export function launchInteractiveSubagent(params: {
     contextText: params.contextText,
   });
   try {
+    // Initialize only an empty artifact before state persistence or launch.
     mkdirSync(paths.artifactDir, { recursive: true });
+    initializeCompletionLockProtocol(paths.artifactDir);
     if (artifactOwnerSessionId) {
       writeFileSync(
         join(paths.artifactDir, INTERACTIVE_ARTIFACT_OWNER_FILE),
@@ -1595,6 +1601,8 @@ function appendCancellation(
   state: InteractiveSubagentState,
   context: ParentCancellationContext,
 ): void {
+  // The legacy wrapper reads .cancelled on exit. It alone publishes the completion.
+  if (readCompletionLockProtocol(state.artifactDir) === "legacy") return;
   let turnId = "process";
   try {
     const active = JSON.parse(

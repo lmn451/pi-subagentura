@@ -50,6 +50,12 @@ import {
   type TelemetryMux,
   type TelemetryTrafficOrigin,
 } from "./telemetry";
+import {
+  completionLockPathForTurn,
+  readCompletionLockProtocol,
+  withCompletionWriterLock,
+  initializeCompletionLockProtocol,
+} from "./completion-writer-lock.mjs";
 
 /** Current schema version for the interactive state file. */
 export const CURRENT_STATE_SCHEMA_VERSION = 2;
@@ -465,7 +471,9 @@ export function artifactPath(rootDir: string, id: string): SubagentArtifact {
 
 /** Create the artifact directory with owner-only perms. Idempotent. */
 export function ensureArtifactDir(art: SubagentArtifact): void {
-  mkdirSync(art.dir, { recursive: true, mode: 0o700 });
+  if (mkdirSync(art.dir, { recursive: true, mode: 0o700 }) !== undefined) {
+    initializeCompletionLockProtocol(art.dir);
+  }
 }
 
 // ── Writes ──────────────────────────────────────────────────────────
@@ -480,51 +488,18 @@ export function newEventId(): EventId {
   return asStringIdentifier<"event">(randomUUID());
 }
 
-const COMPLETION_LOCK_TIMEOUT_MS = 2_000;
-const COMPLETION_LOCK_STALE_MS = 30_000;
-const completionLockWaiter = new Int32Array(new SharedArrayBuffer(4));
-
-function completionLockPath(art: SubagentArtifact, turnId: string): string {
-  const key = createHash("sha256").update(turnId).digest("hex").slice(0, 24);
-  return join(art.dir, `.completion-${key}.lock`);
-}
-
 function withCompletionLock<T>(
   art: SubagentArtifact,
   turnId: string,
   operation: () => T,
 ): T {
   ensureArtifactDir(art);
-  const lockPath = completionLockPath(art, turnId);
-  const deadline = Date.now() + COMPLETION_LOCK_TIMEOUT_MS;
-  while (true) {
-    try {
-      mkdirSync(lockPath, { mode: 0o700 });
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try {
-        if (
-          Date.now() - statSync(lockPath).mtimeMs >
-          COMPLETION_LOCK_STALE_MS
-        ) {
-          rmSync(lockPath, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`timed out acquiring completion lock for ${turnId}`);
-      }
-      Atomics.wait(completionLockWaiter, 0, 0, 10);
-    }
-  }
-  try {
-    return operation();
-  } finally {
-    rmSync(lockPath, { recursive: true, force: true });
-  }
+  return withCompletionWriterLock(
+    completionLockPathForTurn(art.dir, turnId),
+    operation,
+    undefined,
+    readCompletionLockProtocol(art.dir),
+  );
 }
 
 /**

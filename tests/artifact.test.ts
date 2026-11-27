@@ -11,8 +11,10 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   MAX_PERSISTED_STATE_COUNT,
   MAX_PERSISTED_STATE_FILE_BYTES,
@@ -54,6 +56,11 @@ import {
   type InteractiveSubagentPersistedStateV2,
   type SubagentEvent,
 } from "../src/artifact";
+import {
+  COMPLETION_LOCK_PROTOCOL_FILE,
+  completionLockPathForTurn,
+  initializeCompletionLockProtocol,
+} from "../src/completion-writer-lock.mjs";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-artifact-"));
@@ -495,6 +502,98 @@ describe("artifact", () => {
     expect(event?.errorMessage).toBe("e".repeat(MAX_EVENT_TEXT_LENGTH));
     expect(readEvents(art)).toContainEqual(event);
   });
+
+  it("uses the fresh artifact protocol for TypeScript completion writes", () => {
+    const art = artifactPath(root, "atomic-completion");
+    ensureArtifactDir(art);
+    initializeCompletionLockProtocol(art.dir);
+    const turnId = "atomic-turn";
+    const lock = completionLockPathForTurn(art.dir, turnId);
+    mkdirSync(lock);
+    writeOutput(art, "atomic completion output");
+
+    const event = appendCompletionEvent(art, {
+      turnId,
+      outcome: "done",
+      source: "explicit",
+    });
+
+    expect(event?.outcome).toBe("done");
+    expect(readEvents(art)).toContainEqual(event);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "bounds TypeScript completion and cancellation writes for FIFO markers",
+    () => {
+      const art = artifactPath(root, "fifo-completion-marker");
+      ensureArtifactDir(art);
+      const markerPath = join(art.dir, COMPLETION_LOCK_PROTOCOL_FILE);
+      rmSync(markerPath);
+      const fifo = spawnSync("mkfifo", [markerPath], {
+        encoding: "utf8",
+        timeout: 1_000,
+      });
+      expect(fifo.error).toBeUndefined();
+      expect(fifo.status).toBe(0);
+
+      const loaderPath = join(root, "typescript-loader.mjs");
+      writeFileSync(
+        loaderPath,
+        [
+          "export async function resolve(specifier, context, nextResolve) {",
+          "  try {",
+          "    return await nextResolve(specifier, context);",
+          "  } catch (error) {",
+          '    if (error?.code === "ERR_MODULE_NOT_FOUND" && specifier.startsWith(".") && !/\\.[cm]?[jt]sx?$/.test(specifier)) {',
+          '      return nextResolve(specifier + ".ts", context);',
+          "    }",
+          "    throw error;",
+          "  }",
+          "}",
+        ].join("\n"),
+      );
+      const artifactModule = pathToFileURL(
+        resolve(process.cwd(), "src/artifact.ts"),
+      ).href;
+      const script = `
+        import { appendCompletionEvent, artifactPath } from ${JSON.stringify(artifactModule)};
+        process.stdout.write("loaded\\n");
+        const art = artifactPath(${JSON.stringify(root)}, "fifo-completion-marker");
+        for (const event of [
+          { turnId: "fifo-done", outcome: "done", source: "explicit" },
+          { turnId: "fifo-cancelled", outcome: "cancelled", source: "parent" },
+        ]) {
+          try {
+            appendCompletionEvent(art, event);
+            throw new Error("expected unsupported completion lock protocol");
+          } catch (error) {
+            if (!String(error?.message).includes("unsupported completion lock protocol")) throw error;
+          }
+        }
+      `;
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--experimental-strip-types",
+          "--loader",
+          loaderPath,
+          "--input-type=module",
+          "-e",
+          script,
+        ],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          timeout: 10_000,
+        },
+      );
+
+      expect(result.error, `${result.stdout}${result.stderr}`).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      expect(existsSync(art.statusFile)).toBe(false);
+    },
+  );
 
   it("round-trips only valid parent cancellation metadata", () => {
     const art = artifactPath(root, "parent-cancellation-origin");

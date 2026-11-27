@@ -47,6 +47,7 @@ import {
   responsiveFlowMinimumWidth,
 } from "../src/rendering";
 import { createTelemetrySession } from "../src/telemetry";
+import { initializeCompletionLockProtocol } from "../src/completion-writer-lock.mjs";
 
 function makeTmp(): string {
   return mkdtempSync(join(tmpdir(), "pi-subagentura-poll-"));
@@ -2005,6 +2006,7 @@ describe("pollArtifactChanges", () => {
     state.cwd = join(artifactDir, "..");
     state.parentSessionId = "pi";
     mkdirSync(artifactDir, { recursive: true });
+    initializeCompletionLockProtocol(artifactDir);
     writeFileSync(
       join(artifactDir, "active-turn.json"),
       JSON.stringify({ turnId: "cancel-turn", startedAt: Date.now() }),
@@ -2067,6 +2069,7 @@ describe("pollArtifactChanges", () => {
     const multiplexer = await import("../src/multiplexer");
     const { state, artifactDir } = makeState();
     mkdirSync(artifactDir, { recursive: true });
+    initializeCompletionLockProtocol(artifactDir);
     writeFileSync(
       join(artifactDir, "active-turn.json"),
       JSON.stringify({ turnId: "completed-turn", startedAt: Date.now() }),
@@ -2204,6 +2207,7 @@ describe("pollArtifactChanges", () => {
       const id = "rehydrated-idle";
       const artifactDir = join(cwd, id);
       mkdirSync(artifactDir, { recursive: true });
+      initializeCompletionLockProtocol(artifactDir);
       const art = artifactPath(cwd, id);
       appendTestTurnStarted(art, 1, "turn-1");
       appendTestCompletion(art, 2, "done", "turn-1");

@@ -42,6 +42,7 @@ import {
 import registerExtension, { pollArtifactChanges } from "../src/subagent";
 import { workflowJobRegistry } from "../src/workflow";
 import type { WorkflowJobState } from "../src/workflow-jobs";
+import { initializeCompletionLockProtocol } from "../src/completion-writer-lock.mjs";
 
 interface TestExtensionApi {
   registerTool: Mock;
@@ -426,6 +427,7 @@ describe("session_shutdown handler", () => {
     (reason) => {
       cancelByStateSpy.mockRestore();
       tmpRoot = mkdtempSync(join(tmpdir(), "cancel-persistence-"));
+      initializeCompletionLockProtocol(tmpRoot);
       mkdirSync(join(tmpRoot, "events.ndjson"));
       const killPane = vi.fn();
       __setTmuxMultiplexer({
@@ -450,6 +452,7 @@ describe("session_shutdown handler", () => {
     (kind) => {
       cancelByStateSpy.mockRestore();
       tmpRoot = mkdtempSync(join(tmpdir(), "cancel-persistence-"));
+      initializeCompletionLockProtocol(tmpRoot);
       mkdirSync(join(tmpRoot, "events.ndjson"));
       const state = makeState("running", "running", tmpRoot);
       const killPane = vi.fn();

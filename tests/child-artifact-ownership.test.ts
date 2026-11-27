@@ -21,6 +21,7 @@ import {
 } from "../src/child-artifact-ownership";
 import { retireLineageBootstraps } from "../src/spawn-tree-context";
 import { importFresh } from "./test-utils";
+import { ensureArtifactDir, artifactPath } from "../src/artifact";
 
 let root: string;
 let previousArtifactDir: string | undefined;
@@ -136,6 +137,7 @@ describe("one-use child artifact ownership", () => {
     );
 
     const nestedArtifactDir = join(root, "nested-child");
+    ensureArtifactDir(artifactPath(root, "nested-child"));
     const nestedBootstrap = writeChildArtifactBootstrap(nestedArtifactDir);
     const credentialed = spawnSync(nestedPiPath, ["--no-session"], {
       cwd: process.cwd(),

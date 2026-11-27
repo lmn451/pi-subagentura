@@ -66,6 +66,8 @@
     "src/schemas.ts",
     "src/tool-guidance.ts",
     "src/artifact.ts",
+    "src/completion-writer-lock.mjs",
+    "src/completion-writer-lock.d.mts",
     "src/artifact-read.ts",
     "src/artifact-read-model.ts",
     "src/artifact-read-rendering.ts",

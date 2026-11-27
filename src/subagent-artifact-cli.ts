@@ -28,6 +28,7 @@ import {
   MAX_TOOL_NAME_LENGTH,
   MAX_TURN_ID_LENGTH,
 } from "./artifact";
+import { readFileSync as readLockSource } from "node:fs";
 
 /**
  * The body of the CLI as a string, written verbatim to
@@ -150,37 +151,11 @@ const activeTurnMetadata = () => {
 };
 const activeState = activeTurnMetadata();
 const turnId = activeState?.turnId ?? "process";
-const lockKey = createHash("sha256").update(turnId).digest("hex").slice(0, 24);
-const completionLock = join(dir, ".completion-" + lockKey + ".lock");
-const lockWaiter = new Int32Array(new SharedArrayBuffer(4));
-const withCompletionLock = (operation) => {
-  const deadline = Date.now() + 2000;
-  while (true) {
-    try {
-      mkdirSync(completionLock, { mode: 0o700 });
-      break;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - statSync(completionLock).mtimeMs > 30000) {
-          rmSync(completionLock, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error("timed out acquiring completion lock for " + turnId);
-      }
-      Atomics.wait(lockWaiter, 0, 0, 10);
-    }
-  }
-  try {
-    return operation();
-  } finally {
-    rmSync(completionLock, { recursive: true, force: true });
-  }
-};
+${readLockSource(new URL("./completion-writer-lock.mjs", import.meta.url), "utf8")}
+const lockProtocol = readCompletionLockProtocol(dir);
+const completionLock = completionLockPathForTurn(dir, turnId);
+const withCompletionLock = (operation) =>
+  withCompletionWriterLock(completionLock, operation, undefined, lockProtocol);
 const completed = () =>
   readEvents().some((event) =>
     event.version === 2 && event.type === "completion" && event.turnId === turnId);

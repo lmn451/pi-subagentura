@@ -27,7 +27,12 @@ import {
   writeLaunchScript,
   type InteractiveSubagentState,
 } from "../src/interactive-tmux";
-import { stateFilePath, loadInteractiveStates } from "../src/artifact";
+import {
+  stateFilePath,
+  loadInteractiveStates,
+  ensureArtifactDir,
+  artifactPath,
+} from "../src/artifact";
 import { importFresh } from "./test-utils";
 import { createRootSpawnTreeContext } from "../src/spawn-tree-context";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
@@ -105,7 +110,7 @@ describe("launch script EXIT trap (idempotency)", () => {
   });
 
   it("preserves explicit completion and appends one process_exited event", () => {
-    const artDir = join(tmp, "artifacts", "abc12345");
+    const artDir = freshArtifact(tmp, "abc12345");
     const launchScript = join(artDir, "launch.sh");
 
     // Simulate the child obeying the protocol: it called `cli.mjs done 0`, then
@@ -126,7 +131,7 @@ describe("launch script EXIT trap (idempotency)", () => {
   });
 
   it("records an active-tool reason for an rc=0 abrupt exit", () => {
-    const artDir = join(tmp, "artifacts", "active-tool");
+    const artDir = freshArtifact(tmp, "active-tool");
     const launchScript = join(artDir, "launch.sh");
     mkdirSync(artDir, { recursive: true });
     writeFileSync(
@@ -157,7 +162,7 @@ describe("launch script EXIT trap (idempotency)", () => {
   });
 
   it("preserves a non-zero wrapper rc in completion and process_exited", () => {
-    const artDir = join(tmp, "artifacts", "abc12346");
+    const artDir = freshArtifact(tmp, "abc12346");
     const launchScript = join(artDir, "launch.sh");
 
     // Child crashed/exited without calling done. The trap is the ONLY source of
@@ -175,7 +180,7 @@ describe("launch script EXIT trap (idempotency)", () => {
     expect(exits[0].exitCode).toBe(1);
   });
   it("returns the process-exit snapshot for an unbound provisional turn", async () => {
-    const artDir = join(tmp, "artifacts", "early-exit");
+    const artDir = freshArtifact(tmp, "early-exit");
     const launchScript = join(artDir, "launch.sh");
     const turnOutput = "startup diagnostics before exit";
     const childBody = [
@@ -221,7 +226,7 @@ describe("launch script EXIT trap (idempotency)", () => {
   });
 
   it("writes exactly one `cancelled` event when the .cancelled flag is present and the child did not call done", () => {
-    const artDir = join(tmp, "artifacts", "abc12347");
+    const artDir = freshArtifact(tmp, "abc12347");
     const launchScript = join(artDir, "launch.sh");
 
     // Parent called cancel_interactive_subagent, which writes the .cancelled flag.
@@ -241,7 +246,7 @@ describe("launch script EXIT trap (idempotency)", () => {
   });
 
   it("does not duplicate an explicit error completion when the child exits", () => {
-    const artDir = join(tmp, "artifacts", "abc12348");
+    const artDir = freshArtifact(tmp, "abc12348");
     const launchScript = join(artDir, "launch.sh");
 
     // Child declared an unrecoverable failure via cli.mjs error, then exited 0.
@@ -263,7 +268,7 @@ describe("launch script EXIT trap (idempotency)", () => {
     // the pane). The .cancelled flag is set AFTER the child's explicit `done`. The
     // trap should observe the existing `done` and not emit a second terminal event —
     // the child's success is the source of truth, the cancellation is just cleanup.
-    const artDir = join(tmp, "artifacts", "abc12349");
+    const artDir = freshArtifact(tmp, "abc12349");
     const launchScript = join(artDir, "launch.sh");
 
     // The child runs and writes a done event, then the wrapper writes the
@@ -281,7 +286,7 @@ describe("launch script EXIT trap (idempotency)", () => {
   });
 
   it("does not duplicate explicit completion after trailing activity", () => {
-    const artDir = join(tmp, "artifacts", "abc12350");
+    const artDir = freshArtifact(tmp, "abc12350");
     const launchScript = join(artDir, "launch.sh");
     const childBody =
       `"${join(artDir, "cli.mjs")}" done 0\n` +
@@ -299,7 +304,7 @@ describe("launch script EXIT trap (idempotency)", () => {
     ]);
   });
   it("fails the child launch when its ownership bootstrap is missing", () => {
-    const artDir = join(tmp, "artifacts", "missing-owner");
+    const artDir = freshArtifact(tmp, "missing-owner");
     const launchScript = join(artDir, "launch.sh");
     const startedMarker = join(artDir, "pi-started");
     const missingBootstrap = join(
@@ -871,3 +876,8 @@ describe("spawn-time state persistence", () => {
     expect(state.cwd).toBe(cwd);
   });
 });
+function freshArtifact(root: string, id: string): string {
+  const art = artifactPath(join(root, "artifacts"), id);
+  ensureArtifactDir(art);
+  return art.dir;
+}

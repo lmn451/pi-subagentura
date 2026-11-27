@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactPath, readEvents } from "../src/artifact";
+import { artifactPath, readEvents, ensureArtifactDir } from "../src/artifact";
 import { readActiveTurn, registerChildProtocol } from "../src/child-protocol";
 import {
   acquireRuntimeChildArtifactOwnership,
@@ -16,6 +16,7 @@ function registerHandlers() {
   if (!artifactDir) {
     throw new Error("PI_SUBAGENTURA_CHILD requires ARTIFACT_DIR");
   }
+
   process.env[CHILD_ARTIFACT_BOOTSTRAP_ENV] =
     writeChildArtifactBootstrap(artifactDir);
   const ownership = acquireRuntimeChildArtifactOwnership();
@@ -36,6 +37,7 @@ describe("child protocol lifecycle", () => {
     vi.useFakeTimers();
     root = mkdtempSync(join(tmpdir(), "pi-subagentura-child-protocol-"));
     artifactDir = join(root, "child");
+    ensureArtifactDir(artifactPath(root, "child"));
     process.env.ARTIFACT_DIR = artifactDir;
   });
 

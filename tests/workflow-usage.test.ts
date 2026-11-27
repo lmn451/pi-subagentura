@@ -54,6 +54,7 @@ import {
 } from "../src/workflow-worker";
 import type { InteractiveSubagentState } from "../src/interactive-tmux";
 import type { CancellationSnapshotReceipt } from "../src/cancellation-snapshots";
+import { initializeCompletionLockProtocol } from "../src/completion-writer-lock.mjs";
 
 const temporaryDirectories: string[] = [];
 
@@ -66,6 +67,7 @@ function temporaryDirectory(prefix: string): string {
 function interactiveState(cwd: string): InteractiveSubagentState {
   const artifactDir = join(cwd, "agent");
   mkdirSync(artifactDir, { recursive: true });
+  initializeCompletionLockProtocol(artifactDir);
   return {
     id: "agent",
     name: "agent",

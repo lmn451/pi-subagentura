@@ -3,7 +3,7 @@
  */
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   appendEvent,
@@ -13,6 +13,10 @@ import {
   loadInteractiveStates,
   stateFilePath,
 } from "../src/artifact";
+import {
+  initializeCompletionLockProtocol,
+  readCompletionLockProtocol,
+} from "../src/completion-writer-lock.mjs";
 import {
   clearCompletionCoordinator,
   completionLatencyForIds,
@@ -112,6 +116,58 @@ describe("rehydrateInteractiveSubagents", () => {
     expect(rehydrated).toBeDefined();
     expect(rehydrated?.name).toBe("my-agent"); // from prompt file label
     expect(rehydrated?.startedAt).toBe(1000);
+  });
+
+  it("preserves the completion-lock protocol across rehydration", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const id = "atomic-protocol";
+    const artDir = join(cwd, id);
+    mkdirSync(artDir, { recursive: true });
+    initializeCompletionLockProtocol(artDir);
+    appendInteractiveState(cwd, {
+      id,
+      paneId: "%100",
+      mux: "tmux",
+      artifactDir: artDir,
+      sessionFile: "/tmp/atomic-session.jsonl",
+      eventByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
+      lifecycle: { startedAt: 1000 },
+    });
+
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
+
+    expect(scope.interactiveStates.get(id)).toBeDefined();
+    expect(readCompletionLockProtocol(artDir)).toBe("atomic");
+  });
+
+  it("does not rewrite a legacy child helper during rehydration", async () => {
+    const mod =
+      await importFresh<typeof import("../src/subagent")>("../src/subagent");
+    const id = "legacy-helper";
+    const artDir = join(cwd, id);
+    mkdirSync(artDir, { recursive: true });
+    const cliPath = join(artDir, "cli.mjs");
+    writeFileSync(cliPath, "legacy helper image");
+    appendInteractiveState(cwd, {
+      id,
+      paneId: "%101",
+      mux: "tmux",
+      artifactDir: artDir,
+      sessionFile: "/tmp/legacy-session.jsonl",
+      eventByteCursor: 0,
+      pendingDeliveries: [],
+      deliveryReceipts: [],
+      lifecycle: { startedAt: 1000 },
+    });
+
+    mod.rehydrateInteractiveSubagents(cwd, undefined, [], scope);
+
+    expect(scope.interactiveStates.get(id)).toBeDefined();
+    expect(readCompletionLockProtocol(artDir)).toBe("legacy");
+    expect(readFileSync(cliPath, "utf8")).toBe("legacy helper image");
   });
 
   it("falls back to id for name and 0 for startedAt when artifacts are missing", async () => {
