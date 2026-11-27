@@ -180,13 +180,13 @@ it("keeps a replacement lock when release cannot find its own marker", () => {
   expect(existsSync(join(lock, replacementMarker))).toBe(true);
 });
 
-it("propagates legacy inspection and removal errors promptly", () => {
+it("refuses markerless writes before inspecting or removing the lock", () => {
   mkdirSync(lock);
   const startedAt = performance.now();
   fsState.legacyStatError = true;
 
   expect(() => withCompletionWriterLock(lock, () => {}, 100, "legacy")).toThrow(
-    /simulated legacy stat EIO/,
+    /legacy completion writer/,
   );
   expect(performance.now() - startedAt).toBeLessThan(500);
   expect(existsSync(lock)).toBe(true);
@@ -196,7 +196,7 @@ it("propagates legacy inspection and removal errors promptly", () => {
   utimesSync(lock, new Date(0), new Date(0));
   const removalStartedAt = performance.now();
   expect(() => withCompletionWriterLock(lock, () => {}, 100, "legacy")).toThrow(
-    /simulated legacy remove EIO/,
+    /legacy completion writer/,
   );
   expect(performance.now() - removalStartedAt).toBeLessThan(500);
   expect(existsSync(lock)).toBe(true);

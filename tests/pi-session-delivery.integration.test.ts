@@ -5,6 +5,7 @@ import {
   listOutputHistory,
   readEventRecords,
   writeOutput,
+  ensureArtifactDir,
 } from "../src/artifact";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
 import {
@@ -65,7 +66,9 @@ afterEach(() => {
 function childArtifact() {
   const root = mkdtempSync(join(tmpdir(), "pi-subagentura-child-session-"));
   artifactRoots.push(root);
-  return artifactPath(root, "child0001");
+  const art = artifactPath(root, "child0001");
+  ensureArtifactDir(art);
+  return art;
 }
 function resolveHarnessScope(
   harness: PiSessionHarness,
@@ -863,6 +866,7 @@ describe("child protocol lifecycle integration", () => {
 
   it("resets output.md at turn start so an empty turn cannot inherit stale output", async () => {
     const art = childArtifact();
+    ensureArtifactDir(art);
     writeOutput(art, "stale output from the previous turn");
     const harness = await createPiSessionHarness(repoRoot, {
       childArtifactDir: art.dir,

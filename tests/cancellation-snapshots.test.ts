@@ -30,6 +30,7 @@ import {
 } from "../src/cancellation-snapshots";
 import type { CancellationSnapshotSource } from "../src/cancellation-snapshots";
 import { __setTmuxMultiplexer } from "../src/multiplexer";
+import { initializeCompletionLockProtocol } from "../src/completion-writer-lock.mjs";
 
 const originalEnv = {
   mode: process.env.SUBAGENT_CANCEL_SNAPSHOT,
@@ -87,6 +88,7 @@ function interactiveInput(root: string) {
   const outputFile = join(artifactDir, "output.md");
   const activeTurnFile = join(artifactDir, "active-turn.json");
   mkdirSync(artifactDir, { recursive: true });
+  initializeCompletionLockProtocol(artifactDir);
   writeFileSync(sessionFile, '{"type":"session"}\n');
   writeFileSync(eventsFile, '{"type":"turn_started"}\n');
   writeFileSync(outputFile, "child output\n");

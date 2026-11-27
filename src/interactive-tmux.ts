@@ -50,7 +50,10 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { CLI_SOURCE } from "./subagent-artifact-cli";
-import { initializeCompletionLockProtocol } from "./completion-writer-lock.mjs";
+import {
+  initializeCompletionLockProtocol,
+  readCompletionLockProtocol,
+} from "./completion-writer-lock.mjs";
 import {
   appendInteractiveState,
   appendCompletionEvent,
@@ -1598,6 +1601,8 @@ function appendCancellation(
   state: InteractiveSubagentState,
   context: ParentCancellationContext,
 ): void {
+  // The legacy wrapper reads .cancelled on exit. It alone publishes the completion.
+  if (readCompletionLockProtocol(state.artifactDir) === "legacy") return;
   let turnId = "process";
   try {
     const active = JSON.parse(

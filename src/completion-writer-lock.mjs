@@ -1,18 +1,17 @@
 import { createHash as hashTurn, randomUUID as lockToken } from "node:crypto";
 import {
   closeSync as closeLockFd,
-  constants as lockConstants,
-  fstatSync as statLockFd,
-  mkdirSync as makeLockDirectory,
-  mkdtempSync as makeClaimDirectory,
-  openSync as openLockFile,
-  readSync as readLockBytes,
   readdirSync as listOwners,
+  constants as lockConstants,
+  mkdtempSync as makeClaimDirectory,
+  mkdirSync as makeLockDirectory,
+  openSync as openLockFile,
   renameSync as publishPath,
-  rmSync as removeTree,
+  readSync as readLockBytes,
   rmdirSync as removeDirectory,
-  statSync as statLegacyLock,
+  rmSync as removeTree,
   lstatSync as statLockEntry,
+  fstatSync as statLockFd,
   unlinkSync as unlinkLockFile,
   writeFileSync as writeLockFile,
 } from "node:fs";
@@ -21,7 +20,6 @@ import { performance as lockClock } from "node:perf_hooks";
 
 const completionWaiter = new Int32Array(new SharedArrayBuffer(4));
 const LOCK_TIMEOUT_MS = 2_000;
-const LEGACY_STALE_MS = 30_000;
 const RETRY_INTERVAL_MS = 10;
 const MAX_PROTOCOL_MARKER_BYTES = 128;
 const ATOMIC_PROTOCOL_MARKER = "atomic-directory-rename-v1\n";
@@ -215,26 +213,6 @@ function recoverAtomicWriter(lock) {
   return undefined;
 }
 
-// Markerless artifacts may still run the v1 CLI, so keep its age-based rule.
-function recoverLegacyWriter(lock) {
-  let metadata;
-  try {
-    metadata = statLegacyLock(lock);
-  } catch (error) {
-    if (error.code === "ENOENT") return undefined;
-    throw error;
-  }
-  if (Date.now() - metadata.mtimeMs <= LEGACY_STALE_MS) {
-    return "legacy lock is recent or its owner is unknown";
-  }
-  try {
-    removeTree(lock, { recursive: true, force: true });
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-  return undefined;
-}
-
 function withAtomicCompletionLock(lock, operation, timeoutMs) {
   const ownerName = `${process.pid}-${lockToken()}`;
   const claimPath = makeClaimDirectory(
@@ -275,34 +253,6 @@ function withAtomicCompletionLock(lock, operation, timeoutMs) {
   }
 }
 
-function withLegacyCompletionLock(lock, operation, timeoutMs) {
-  const deadline = lockClock.now() + timeoutMs;
-  let firstAttempt = true;
-  let lastRecoveryReason;
-  while (true) {
-    if (!firstAttempt && lockClock.now() >= deadline) {
-      throw timeoutError(lock, lastRecoveryReason);
-    }
-    firstAttempt = false;
-    try {
-      makeLockDirectory(lock, { mode: 0o700 });
-      break;
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-    }
-    if (lockClock.now() >= deadline) {
-      throw timeoutError(lock, lastRecoveryReason);
-    }
-    lastRecoveryReason = recoverLegacyWriter(lock);
-    waitForRetry(deadline, lock, lastRecoveryReason);
-  }
-  try {
-    return operation();
-  } finally {
-    removeTree(lock, { recursive: true, force: true });
-  }
-}
-
 export function withCompletionWriterLock(
   lock,
   operation,
@@ -314,7 +264,9 @@ export function withCompletionWriterLock(
     return withAtomicCompletionLock(lock, operation, timeoutMs);
   }
   if (protocol === "legacy") {
-    return withLegacyCompletionLock(lock, operation, timeoutMs);
+    throw new Error(
+      `legacy completion writer owns this artifact; new writer did not acquire ${lock}`,
+    );
   }
   throw new Error(
     `unsupported completion lock protocol for ${lock}; no lock was acquired`,

@@ -529,6 +529,7 @@ describe("artifact", () => {
       const art = artifactPath(root, "fifo-completion-marker");
       ensureArtifactDir(art);
       const markerPath = join(art.dir, COMPLETION_LOCK_PROTOCOL_FILE);
+      rmSync(markerPath);
       const fifo = spawnSync("mkfifo", [markerPath], {
         encoding: "utf8",
         timeout: 1_000,

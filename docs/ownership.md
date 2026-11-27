@@ -84,11 +84,9 @@ it does not rewrite a child helper that may already be running.
   A crash before publication can leave a hidden claim directory. It does not
   hold the stable lock and artifact cleanup removes it with the artifact.
 - **Marker absent** — this is a legacy resumed artifact. Keep its persisted
-  helper and use the legacy age-based lock protocol. Do not migrate it during
-  rehydrate and do not stop or restart the child automatically. The current
-  parent bounds its own retries and propagates filesystem errors. A persisted
-  old CLI keeps its old retry loop; an inspection/removal error can still pass
-  its deadline, and its 30-second takeover risk remains.
+  helper as the completion writer. New writers refuse to acquire or remove its
+  lock, even when no lock currently exists. Read the completion from the old
+  child; do not migrate the artifact or restart the child automatically.
 - **Marker invalid or from an unknown version** — fail completion writes. Do not
   guess a protocol or remove the lock.
 

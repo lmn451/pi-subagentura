@@ -43,6 +43,7 @@ import {
   type TelemetrySession,
 } from "../src/telemetry";
 import { createTestSessionScope } from "./session-scope-fixture";
+import { initializeCompletionLockProtocol } from "../src/completion-writer-lock.mjs";
 
 const SCRIPT =
   'export const meta = { name: "cancelled-child", description: "d" };\n' +
@@ -283,6 +284,7 @@ describe("workflow mux probe diagnostics", () => {
     const { payloads, telemetry } = telemetryScope(906);
     const art = artifactPath(root, "mux-probe");
     mkdirSync(art.dir, { recursive: true });
+    initializeCompletionLockProtocol(art.dir);
     writeFileSync(art.statusFile, "");
     const getPaneLivenessAsync = vi.fn(async () => "unknown" as const);
     const probeMux = {
@@ -386,6 +388,7 @@ describe("workflow mux probe diagnostics", () => {
     const secondArtifact = artifactPath(root, "pane-two");
     for (const art of [firstArtifact, secondArtifact]) {
       mkdirSync(art.dir, { recursive: true });
+      initializeCompletionLockProtocol(art.dir);
       writeFileSync(art.statusFile, "");
     }
     const makeState = (

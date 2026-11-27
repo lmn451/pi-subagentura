@@ -63,6 +63,7 @@ describe("subagent-artifact CLI", () => {
 
   beforeEach(() => {
     tmp = makeTmp();
+    initializeCompletionLockProtocol(tmp);
   });
 
   afterEach(() => {
@@ -372,7 +373,8 @@ describe("subagent-artifact CLI", () => {
       expect(existsSync(join(tmp, "outputs"))).toBe(true);
     });
 
-    it("keeps markerless resumed artifacts on the legacy lock protocol", () => {
+    it("refuses to complete a markerless resumed artifact", () => {
+      rmSync(join(tmp, COMPLETION_LOCK_PROTOCOL_FILE));
       const turnId = "legacy-cli-turn";
       writeFileSync(
         join(tmp, "active-turn.json"),
@@ -391,12 +393,10 @@ describe("subagent-artifact CLI", () => {
       });
 
       expect(result.error).toBeUndefined();
-      expect(result.status).toBe(0);
-      expect(existsSync(lock)).toBe(false);
-      const event = JSON.parse(
-        readFileSync(join(tmp, "events.ndjson"), "utf8").trim(),
-      );
-      expect(event).toMatchObject({ type: "completion", turnId });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("legacy completion writer");
+      expect(existsSync(lock)).toBe(true);
+      expect(existsSync(join(tmp, "events.ndjson"))).toBe(false);
     });
 
     it("uses atomic recovery for a freshly marked artifact", () => {
@@ -435,6 +435,7 @@ describe("subagent-artifact CLI", () => {
         `does not block the generated ${label} helper on a FIFO marker`,
         () => {
           const markerPath = join(tmp, COMPLETION_LOCK_PROTOCOL_FILE);
+          rmSync(markerPath);
           const fifo = spawnSync("mkfifo", [markerPath], {
             encoding: "utf8",
             timeout: 1_000,
@@ -606,6 +607,7 @@ describe("platform process-exit signals", () => {
     (signal) => {
       const tmp = makeTmp();
       try {
+        initializeCompletionLockProtocol(tmp);
         const exitCode = 128 + constants.signals[signal];
         expect(runCli(tmp, ["process-exit", String(exitCode)]).status).toBe(0);
         const event = JSON.parse(
@@ -632,6 +634,7 @@ describe("platform process-exit signals", () => {
       try {
         const art = artifactPath(tmp, "child");
         mkdirSync(art.dir);
+        initializeCompletionLockProtocol(art.dir);
         const signalName = hostSignalName!;
         const signalNumber = platformSignals[signalName];
         const exitCode = 128 + signalNumber;

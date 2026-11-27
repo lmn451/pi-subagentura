@@ -52,14 +52,16 @@ it("reports lock inspection errors instead of retrying", () => {
   expect(() => withCompletionWriterLock(lock, () => {})).toThrow(/ENOTDIR/);
 });
 
-it("keeps legacy age recovery when an artifact has no protocol marker", () => {
+it("never takes over a markerless artifact by age", () => {
   mkdirSync(lock);
   utimesSync(lock, new Date(0), new Date(0));
   const operation = vi.fn(() => 42);
 
-  expect(withCompletionWriterLock(lock, operation, 2_000, "legacy")).toBe(42);
-  expect(operation).toHaveBeenCalledOnce();
-  expect(existsSync(lock)).toBe(false);
+  expect(() =>
+    withCompletionWriterLock(lock, operation, 2_000, "legacy"),
+  ).toThrow(/legacy completion writer/);
+  expect(operation).not.toHaveBeenCalled();
+  expect(existsSync(lock)).toBe(true);
 });
 
 it("rejects non-regular and oversized protocol markers", () => {

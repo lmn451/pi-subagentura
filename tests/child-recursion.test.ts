@@ -26,6 +26,7 @@ import {
   createSessionScope,
   registerSessionScope,
 } from "../src/session-scope";
+import { initializeCompletionLockProtocol } from "../src/completion-writer-lock.mjs";
 
 const tempDirs: string[] = [];
 
@@ -106,6 +107,7 @@ describe("recursive interactive children", () => {
   it("leaves descendant delivery to its owner and kills on unknown liveness", () => {
     const artifactDir = join(tempDir(), "artifact");
     mkdirSync(artifactDir, { recursive: true });
+    initializeCompletionLockProtocol(artifactDir);
     const killPane = vi.fn();
     __setTmuxMultiplexer({
       getPaneLiveness: vi.fn(() => "unknown"),

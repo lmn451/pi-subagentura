@@ -54,6 +54,7 @@ import {
   completionLockPathForTurn,
   readCompletionLockProtocol,
   withCompletionWriterLock,
+  initializeCompletionLockProtocol,
 } from "./completion-writer-lock.mjs";
 
 /** Current schema version for the interactive state file. */
@@ -470,7 +471,9 @@ export function artifactPath(rootDir: string, id: string): SubagentArtifact {
 
 /** Create the artifact directory with owner-only perms. Idempotent. */
 export function ensureArtifactDir(art: SubagentArtifact): void {
-  mkdirSync(art.dir, { recursive: true, mode: 0o700 });
+  if (mkdirSync(art.dir, { recursive: true, mode: 0o700 }) !== undefined) {
+    initializeCompletionLockProtocol(art.dir);
+  }
 }
 
 // ── Writes ──────────────────────────────────────────────────────────

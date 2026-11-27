@@ -11,6 +11,7 @@ import {
   readEventRecords,
   readOutputForTurnId,
   writeOutput,
+  ensureArtifactDir,
 } from "../src/artifact";
 import { readActiveTurn } from "../src/child-protocol";
 import {
@@ -73,6 +74,7 @@ it("reads raw terminal diagnostics through a live Pi host within the byte bound"
   const artifactRoot = mkdtempSync(join(tmpdir(), "subagentura-live-read-"));
   roots.push(artifactRoot);
   const art = artifactPath(artifactRoot, "ab12cd3800000018");
+  ensureArtifactDir(art);
   const diagnostic =
     'Expected response: {"status":"bad" "session_token":"private-marker"}; ' +
     "Authorization: Bearer synthetic-bearer; Cookie: synthetic-cookie; " +
@@ -177,7 +179,9 @@ it("reads raw terminal diagnostics through a live Pi host within the byte bound"
 function makeArtifact() {
   const root = mkdtempSync(join(tmpdir(), "subagentura-v2-delivery-"));
   roots.push(root);
-  return artifactPath(root, "child0001");
+  const art = artifactPath(root, "child0001");
+  ensureArtifactDir(art);
+  return art;
 }
 
 function makeState(artifactDir: string): InteractiveSubagentState {
