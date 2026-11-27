@@ -109,7 +109,7 @@ describe("child protocol lifecycle", () => {
     expect(events.at(-1)).not.toHaveProperty("agentStopReason");
   });
 
-  it.each(["agent_settled", "session_shutdown"])(
+  it.each(["agent_settled", "session_shutdown", "before_agent_start"])(
     "retires pending turn binds on %s before Pi invalidates the context",
     (boundary) => {
       const handlers = registerHandlers();
