@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.5.0] - 2026-11-27
+
+### Added
+
+- Add `--force-jev` to require configured native classifier advice for implicit
+  OrchestratorV2 routing, and assess the whole request before splitting work.
+
+### Fixed
+
+- Prevent a stale deferred turn bind from failing successful fast `pi --print`
+  child runs during shutdown (#277).
+- Improve OrchestratorV2 routing when owner advice is uncertain, and read named
+  artifact files without requiring a turn ID.
+- Enforce workflow input and output contracts and report missing or corrupt
+  output snapshots.
+- Open artifact state and output files without waiting for FIFO writers.
+
 ## [4.4.0] - 2026-11-19
 
 ### Added
