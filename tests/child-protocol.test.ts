@@ -59,8 +59,8 @@ describe("child protocol lifecycle", () => {
     handlers.get("before_agent_start")!({}, ctx);
     expect(readActiveTurn()?.started).toBe(false);
 
-    entries = [{ id: "user-1", type: "message", message: { role: "user" } }];
     handlers.get("turn_start")!({ timestamp: 100 }, ctx);
+    entries = [{ id: "user-1", type: "message", message: { role: "user" } }];
     vi.runAllTimers();
     expect(readActiveTurn()).toMatchObject({ turnId: "user-1", started: true });
 
@@ -108,6 +108,43 @@ describe("child protocol lifecycle", () => {
     });
     expect(events.at(-1)).not.toHaveProperty("agentStopReason");
   });
+
+  it.each(["agent_settled", "session_shutdown"])(
+    "retires pending turn binds on %s before Pi invalidates the context",
+    (boundary) => {
+      const handlers = registerHandlers();
+      const entries: { id: string; type: string; message: { role: string } }[] =
+        [];
+      let live = true;
+      const ctx = {
+        get sessionManager() {
+          if (!live) throw new Error("stale extension context");
+          return { getEntries: () => entries };
+        },
+      };
+
+      handlers.get("before_agent_start")!({}, ctx);
+      handlers.get("turn_start")!({ timestamp: 100 }, ctx);
+      handlers.get("turn_start")!({ timestamp: 101 }, ctx);
+      entries.push({
+        id: "persisted-user",
+        type: "message",
+        message: { role: "user" },
+      });
+      handlers.get(boundary)?.({}, ctx);
+      live = false;
+      expect(() => vi.runAllTimers()).not.toThrow();
+
+      expect(readEvents(artifactPath(root, "child"))).toMatchObject(
+        boundary === "agent_settled"
+          ? [
+              { type: "turn_started", turnId: "persisted-user" },
+              { type: "completion", turnId: "persisted-user", outcome: "done" },
+            ]
+          : [],
+      );
+    },
+  );
 
   it("keeps startup auth failure separate from a later successful turn", async () => {
     const handlers = registerHandlers();
