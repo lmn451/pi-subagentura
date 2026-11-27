@@ -1,3 +1,4 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   createJevRoutingEngine,
   isJevRoutingConfigured,
@@ -7,12 +8,17 @@ import type { RoutingEngine } from "./routing-engine";
 
 export type RoutingEngineFactoryOptions = JevRoutingEngineOptions;
 export const isRoutingConfigured = isJevRoutingConfigured;
+export const FORCE_JEV_FLAG = "force-jev";
+
+export function isForceJevEnabled(pi: ExtensionAPI): boolean {
+  return pi.getFlag(FORCE_JEV_FLAG) === true;
+}
 
 /** Native Pi classification is the sole backend; no external fallback. */
 export function createRoutingEngine(
   options: RoutingEngineFactoryOptions = {},
 ): RoutingEngine | undefined {
-  if (!isRoutingConfigured(options.env)) return undefined;
+  if (!isRoutingConfigured(options.env, options.forceJev)) return undefined;
   return createJevRoutingEngine(options);
 }
 

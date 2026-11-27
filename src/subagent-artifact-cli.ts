@@ -110,7 +110,7 @@ const normalizeActiveTool = (value) => {
 const activeTurnMetadata = () => {
   let fd;
   try {
-    fd = openSync(activeTurnFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+    fd = openSync(activeTurnFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const metadata = fstatSync(fd);
     if (!metadata.isFile() || metadata.size > MAX_ACTIVE_TURN_BYTES) return null;
     const buffer = Buffer.alloc(metadata.size);
@@ -193,7 +193,7 @@ const snapshot = (eventId) => {
   let fd;
   let content;
   try {
-    fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+    fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = fstatSync(fd);
     if (!stat.isFile()) {
       return { outputError: { code: "output_unavailable", message: "output.md is not a regular file" } };

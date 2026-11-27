@@ -1,4 +1,11 @@
-import type { ParentWorkerMessage, WorkerParentMessage } from "./workflow-rpc";
+import type {
+  ParentWorkerMessage,
+  WorkerAgentOpts,
+  WorkerParentMessage,
+} from "./workflow-rpc";
+export function isWorkflowAgentIsolation(
+  value: unknown,
+): value is NonNullable<WorkerAgentOpts["isolation"]>;
 export function isParentWorkerMessage(
   value: unknown,
 ): value is ParentWorkerMessage;

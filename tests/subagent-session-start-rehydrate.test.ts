@@ -85,12 +85,13 @@ describe("session_start rehydrate integration", () => {
     scope = getSessionScopes().find(
       (candidate) => candidate.pi === (api as unknown),
     )!;
-    let startHandler:
-      | ((event: any, ctx: any) => void | Promise<void>)
-      | undefined;
-    for (const [event, handler] of (api.on as any).mock.calls) {
-      if (event === "session_start") startHandler = handler;
-    }
+    const startHandlers = api.on.mock.calls
+      .filter(([event]) => event === "session_start")
+      .map(([, handler]) => handler);
+    expect(startHandlers.length).toBeGreaterThan(0);
+    const startHandler = async (event: unknown, ctx: unknown) => {
+      for (const handler of startHandlers) await handler(event, ctx);
+    };
     return { api, startHandler };
   }
 
@@ -112,13 +113,7 @@ describe("session_start rehydrate integration", () => {
     });
 
     const { startHandler } = await setupExtension();
-    expect(startHandler).toBeTypeOf("function");
-    startHandler!(
-      { type: "session_start", reason: "reload" },
-      {
-        cwd,
-      },
-    );
+    await startHandler({ type: "session_start", reason: "reload" }, { cwd });
 
     expect(scope.interactiveStates.has("abc12345")).toBe(true);
   });
@@ -126,14 +121,10 @@ describe("session_start rehydrate integration", () => {
   it("session_start handler survives a missing state file (empty registry)", async () => {
     await importFresh<typeof import("../src/subagent")>("../src/subagent");
     const { startHandler } = await setupExtension();
-    expect(() =>
-      startHandler!(
-        { type: "session_start", reason: "startup" },
-        {
-          cwd: "/nonexistent",
-        },
-      ),
-    ).not.toThrow();
+    await startHandler(
+      { type: "session_start", reason: "startup" },
+      { cwd: "/nonexistent" },
+    );
     expect(scope.interactiveStates.size).toBe(0);
   });
 
@@ -149,7 +140,7 @@ describe("session_start rehydrate integration", () => {
       const ctx = parentContext(cwd, [saved]);
 
       const { api, startHandler } = await setupExtension();
-      await startHandler!({ type: "session_start", reason }, ctx);
+      await startHandler({ type: "session_start", reason }, ctx);
       const result = await registeredTool(
         api,
         "list_orchestrator_agents",
@@ -202,7 +193,7 @@ describe("session_start rehydrate integration", () => {
       };
     });
     const { api, startHandler } = await setupExtension();
-    await startHandler!({ type: "session_start", reason: "reload" }, ctx);
+    await startHandler({ type: "session_start", reason: "reload" }, ctx);
 
     const listed = await registeredTool(
       api,
@@ -250,7 +241,7 @@ describe("session_start rehydrate integration", () => {
     writeFileSync(join(cwd, ".pi", "subagentura-routing.json"), "{");
 
     const { startHandler } = await setupExtension();
-    await startHandler!({ type: "session_start", reason: "reload" }, { cwd });
+    await startHandler({ type: "session_start", reason: "reload" }, { cwd });
 
     expect(scope.interactiveStates.has("runtime-survives")).toBe(true);
     expect(mockDebugLog).toHaveBeenCalledWith(
@@ -273,10 +264,13 @@ describe("session_start rehydrate integration", () => {
     });
 
     const { startHandler } = await setupExtension();
-    startHandler!({ type: "session_start", reason: "startup" } as any, {
-      cwd,
-      sessionManager: { getSessionId: () => "session-new" },
-    });
+    await startHandler(
+      { type: "session_start", reason: "startup" },
+      {
+        cwd,
+        sessionManager: { getSessionId: () => "session-new" },
+      },
+    );
 
     // Registry should be empty - different session, no match
     expect(scope.interactiveStates.size).toBe(0);
@@ -294,10 +288,13 @@ describe("session_start rehydrate integration", () => {
     });
 
     const { startHandler } = await setupExtension();
-    startHandler!({ type: "session_start", reason: "startup" } as any, {
-      cwd,
-      sessionManager: { getSessionId: () => "session-mine" },
-    });
+    await startHandler(
+      { type: "session_start", reason: "startup" },
+      {
+        cwd,
+        sessionManager: { getSessionId: () => "session-mine" },
+      },
+    );
 
     // Registry should have the entry - matching session after restart with --session
     expect(scope.interactiveStates.size).toBe(1);
@@ -326,10 +323,13 @@ describe("session_start rehydrate integration", () => {
     });
 
     const { startHandler } = await setupExtension();
-    startHandler!({ type: "session_start", reason: "reload" } as any, {
-      cwd,
-      sessionManager: { getSessionId: () => "session-current" },
-    });
+    await startHandler(
+      { type: "session_start", reason: "reload" },
+      {
+        cwd,
+        sessionManager: { getSessionId: () => "session-current" },
+      },
+    );
 
     // Only the matching entry should be rehydrated
     expect(scope.interactiveStates.size).toBe(1);
@@ -348,7 +348,7 @@ describe("session_start rehydrate integration", () => {
     });
 
     const { startHandler } = await setupExtension();
-    startHandler!({ type: "session_start", reason: "new" }, { cwd });
+    await startHandler({ type: "session_start", reason: "new" }, { cwd });
 
     // Registry should be empty - new sessions don't rehydrate old subagents
     expect(scope.interactiveStates.size).toBe(0);
@@ -365,7 +365,7 @@ describe("session_start rehydrate integration", () => {
     });
 
     const { startHandler } = await setupExtension();
-    startHandler!({ type: "session_start", reason: "fork" }, { cwd });
+    await startHandler({ type: "session_start", reason: "fork" }, { cwd });
 
     // Registry should be empty - forked sessions don't rehydrate old subagents
     expect(scope.interactiveStates.size).toBe(0);
@@ -382,7 +382,7 @@ describe("session_start rehydrate integration", () => {
     });
 
     const { startHandler } = await setupExtension();
-    startHandler!({ type: "session_start", reason: "resume" }, { cwd });
+    await startHandler({ type: "session_start", reason: "resume" }, { cwd });
 
     // Registry should have the rehydrated entry - resume preserves subagents
     expect(scope.interactiveStates.size).toBe(1);
@@ -400,7 +400,7 @@ describe("session_start rehydrate integration", () => {
     });
 
     const { startHandler } = await setupExtension();
-    startHandler!({ type: "session_start", reason: "reload" }, { cwd });
+    await startHandler({ type: "session_start", reason: "reload" }, { cwd });
 
     // Registry should have the rehydrated entry - reload preserves subagents
     expect(scope.interactiveStates.size).toBe(1);

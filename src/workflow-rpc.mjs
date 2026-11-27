@@ -10,18 +10,21 @@ function id(value) {
 function nonnegative(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
+/** @param {unknown} value @returns {value is NonNullable<import('./workflow-rpc.ts').WorkerAgentOpts['isolation']>} */
+export function isWorkflowAgentIsolation(value) {
+  return value === "process" || value === "in-process";
+}
 /** @param {unknown} value */
 function options(value) {
   if (value === undefined) return true;
   if (!record(value)) return false;
-  const strings = [
-    "label",
-    "phase",
-    "model",
-    "persona",
-    "isolation",
-    "agentType",
-  ];
+  if (
+    value.isolation !== undefined &&
+    !isWorkflowAgentIsolation(value.isolation)
+  ) {
+    return false;
+  }
+  const strings = ["label", "phase", "model", "persona", "agentType"];
   if (
     !strings.every(
       (key) => value[key] === undefined || typeof value[key] === "string",

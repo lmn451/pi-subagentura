@@ -521,7 +521,10 @@ export function snapshotOutputForEvent(
   let fd: number | undefined;
   let content: Buffer;
   try {
-    fd = openSync(art.outputFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+    fd = openSync(
+      art.outputFile,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
     const stat = fstatSync(fd);
     if (!stat.isFile()) {
       return {
@@ -1579,7 +1582,10 @@ type StateReadResult =
 function readStateFileSnapshot(file: string): StateReadResult {
   let fd: number | undefined;
   try {
-    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    fd = openSync(
+      file,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT"
       ? { kind: "missing" }

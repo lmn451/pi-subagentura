@@ -46,6 +46,81 @@ afterEach(() => {
 });
 
 describe("native Jev routing", () => {
+  it.each([
+    {
+      name: "defaults",
+      overrides: {},
+      provider: "openrouter",
+      id: "~typesafe/jev-latest",
+    },
+    {
+      name: "provider override",
+      overrides: { PI_ORCHESTRATOR_ROUTER_PROVIDER: "alternate-provider" },
+      provider: "alternate-provider",
+      id: "~typesafe/jev-latest",
+    },
+    {
+      name: "model override",
+      overrides: { PI_ORCHESTRATOR_ROUTER_MODEL: "alternate-classifier" },
+      provider: "openrouter",
+      id: "alternate-classifier",
+    },
+  ])(
+    "uses the $name in forced mode without the selector",
+    async ({ overrides, provider, id }) => {
+      const modelRegistry = nativeClassifierRegistry();
+      const model = { ...modelRegistry.model, provider, id };
+      modelRegistry.findOfType.mockReturnValue(model);
+      modelRegistry.classify.mockResolvedValue(winner());
+      const engine = createJevRoutingEngine({
+        forceJev: true,
+        env: overrides,
+        modelRegistry,
+      });
+      expect(engine).toBeDefined();
+      await expect(engine!.decide(input)).resolves.toMatchObject({
+        kind: "match",
+        childId: "child-alpha",
+      });
+      expect(modelRegistry.findOfType.mock.calls).toEqual([
+        ["classifier", provider, id],
+        ["classifier", provider, id],
+      ]);
+      expect(modelRegistry.classify).toHaveBeenCalledExactlyOnceWith(
+        model,
+        expect.anything(),
+        expect.anything(),
+      );
+    },
+  );
+
+  it("rejects a chat or missing entry in forced mode without trying the default", async () => {
+    const modelRegistry = nativeClassifierRegistry();
+    const model = { ...modelRegistry.model, id: "selected-model" };
+    modelRegistry.findOfType.mockReturnValue(model);
+    const options = {
+      forceJev: true,
+      env: { PI_ORCHESTRATOR_ROUTER_MODEL: model.id },
+      modelRegistry,
+    };
+    const engine = createJevRoutingEngine(options);
+    expect(engine).toBeDefined();
+    const chatModel = { ...model, type: "llm", api: "openai-completions" };
+    for (const invalid of [chatModel as unknown as typeof model, undefined]) {
+      modelRegistry.findOfType.mockClear().mockReturnValue(invalid);
+      expect(createJevRoutingEngine(options)).toBeUndefined();
+      await expect(engine!.decide(input)).resolves.toEqual({
+        kind: "error",
+        reason: "unavailable",
+      });
+      expect(modelRegistry.findOfType.mock.calls).toEqual([
+        ["classifier", model.provider, model.id],
+        ["classifier", model.provider, model.id],
+      ]);
+    }
+    expect(modelRegistry.classify).not.toHaveBeenCalled();
+  });
+
   it("calls only Pi with scrubbed opaque choices and maps a healthy winner", async () => {
     const { engine, modelRegistry } = setup({
       CUSTOM_API_KEY: "opaque-credential-value",
@@ -320,26 +395,34 @@ describe("native Jev routing", () => {
     expect(modelRegistry.classify).toHaveBeenCalledOnce();
   });
 
-  it("disables invalid configuration without calling Pi", () => {
-    const modelRegistry = nativeClassifierRegistry();
-    for (const overrides of [
-      { PI_ORCHESTRATOR_ROUTER_MIN_MARGIN: "NaN" },
-      { PI_ORCHESTRATOR_ROUTER_MODEL: " " },
-      { PI_ORCHESTRATOR_ROUTER_PROVIDER: "x".repeat(257) },
-    ]) {
+  it.each([false, true])(
+    "disables invalid configuration without calling Pi (force=%s)",
+    (forceJev) => {
+      const modelRegistry = nativeClassifierRegistry();
+      const selector = forceJev ? {} : env;
+      for (const overrides of [
+        { PI_ORCHESTRATOR_ROUTER_MIN_MARGIN: "NaN" },
+        { PI_ORCHESTRATOR_ROUTER_MODEL: " " },
+        { PI_ORCHESTRATOR_ROUTER_PROVIDER: "x".repeat(257) },
+        { PI_ORCHESTRATOR_ROUTER_PROVIDER: "" },
+      ]) {
+        expect(
+          createJevRoutingEngine({
+            env: { ...selector, ...overrides },
+            forceJev,
+            modelRegistry,
+          }),
+        ).toBeUndefined();
+      }
+      modelRegistry.findOfType.mockImplementation(() => {
+        throw new Error("catalog failure");
+      });
       expect(
-        createJevRoutingEngine({
-          env: { ...env, ...overrides },
-          modelRegistry,
-        }),
+        createJevRoutingEngine({ env: selector, forceJev, modelRegistry }),
       ).toBeUndefined();
-    }
-    modelRegistry.findOfType.mockImplementation(() => {
-      throw new Error("catalog failure");
-    });
-    expect(createJevRoutingEngine({ env, modelRegistry })).toBeUndefined();
-    expect(modelRegistry.classify).not.toHaveBeenCalled();
-  });
+      expect(modelRegistry.classify).not.toHaveBeenCalled();
+    },
+  );
 
   it("bounds blocked classification and aborts the host request on timeout", async () => {
     vi.useFakeTimers();
@@ -433,4 +516,37 @@ describe("routing evidence policy", () => {
       }),
     ).toEqual({ kind: "error", reason: "invalid_response" });
   });
+});
+it("classifies the whole request before assigning its independent parts", async () => {
+  const { engine, modelRegistry } = setup();
+  const whole = {
+    task: "Review API validation and review persistence",
+    candidates: [],
+    assessSplit: true,
+  };
+  modelRegistry.classify.mockResolvedValueOnce(
+    classifierResult("split", { split: 0.95, none: 0.05 }),
+  );
+  expect(await engine.decide(whole)).toMatchObject({ kind: "split_needed" });
+  expect(modelRegistry.classify.mock.calls[0][1].state.task).toBe(whole.task);
+  for (const [i, task] of [
+    "Review API validation",
+    "Review persistence",
+  ].entries()) {
+    const token = "candidate_" + i;
+    modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult(token, {
+        candidate_0: i === 0 ? 0.96 : 0.02,
+        candidate_1: i === 1 ? 0.96 : 0.02,
+        none: 0.02,
+      }),
+    );
+    expect(await engine.decide({ ...input, task })).toMatchObject({
+      kind: "match",
+      childId: input.candidates[i].childId,
+    });
+    const context = modelRegistry.classify.mock.calls[i + 1][1];
+    expect(context.state.task).toBe(task);
+    expect(context.questions.route.criteria).not.toHaveProperty("split");
+  }
 });

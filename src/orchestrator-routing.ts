@@ -473,7 +473,9 @@ function latestAuthorityByChild(
   }
   return latest;
 }
-function authoritativeRecords(
+
+/** Read validated parent authority without consulting the project cache. */
+export function listOrchestratorRoutingAuthorityEntries(
   cwd: string,
   authorityEntries: readonly unknown[],
 ): OrchestratorRoutingEntry[] {
@@ -531,7 +533,10 @@ export function loadOrchestratorRoutingMetadata(
   const result = loadOrchestratorRoutingOverlay(cwd);
   const resolvedAuthorities = authorityEntries;
   if (resolvedAuthorities !== undefined) {
-    const records = authoritativeRecords(cwd, resolvedAuthorities);
+    const records = listOrchestratorRoutingAuthorityEntries(
+      cwd,
+      resolvedAuthorities,
+    );
     return {
       status:
         records.length === 0
@@ -585,7 +590,10 @@ function loadOrchestratorRoutingProjectionMetadata(
   }
   const resolvedAuthorities = authorityEntries;
   if (resolvedAuthorities !== undefined) {
-    const records = authoritativeRecords(cwd, resolvedAuthorities);
+    const records = listOrchestratorRoutingAuthorityEntries(
+      cwd,
+      resolvedAuthorities,
+    );
     const cacheRecords =
       result.status === "empty" || result.status === "loaded"
         ? result.overlay.records
@@ -1158,7 +1166,10 @@ function overlayForWrite(
     return {
       schemaVersion: ORCHESTRATOR_ROUTING_SCHEMA_VERSION,
       projectId: routingProjectId(cwd),
-      records: authoritativeRecords(cwd, resolvedAuthorities),
+      records: listOrchestratorRoutingAuthorityEntries(
+        cwd,
+        resolvedAuthorities,
+      ),
     };
   }
   if (result.status === "missing") return emptyOverlay(routingProjectId(cwd));
