@@ -59,8 +59,8 @@ import {
 
 import { basename, dirname } from "node:path";
 import {
-  getRunningWorkflowCount,
-  workflowJobBelongsToOwner,
+  workflowJobsForOwner,
+  type WorkflowJobState,
   workflowJobRegistry,
 } from "./workflow-jobs";
 import {
@@ -1142,15 +1142,17 @@ async function runPollArtifactChanges(
       updateWidgetRows(ui, WIDGET_KEY, hideAgentList ? [] : widgetRows, owner);
       // Workflow TUI footer + widget: show running async workflows.
       try {
-        const wfCount = getRunningWorkflowCount(owner);
-        const workflowRows = formatWorkflowWidgetRows(owner, now);
+        const running = workflowJobsForOwner(owner).filter(
+          (job) => job.status === "running",
+        );
+        const workflowRows = formatWorkflowWidgetRows(running, now);
         const workflowContribution: WorkflowFooterContribution | undefined =
-          wfCount > 0
+          running.length > 0
             ? {
                 kind: "workflow",
-                count: wfCount,
+                count: running.length,
                 footerLabel: orchestratorLabelForOwner(owner),
-                usage: aggregateWorkflowFooterUsage(owner),
+                usage: aggregateWorkflowFooterUsage(running),
               }
             : undefined;
         updateFooterStatus(
@@ -1174,13 +1176,11 @@ async function runPollArtifactChanges(
 }
 
 function formatWorkflowWidgetRows(
-  owner: SessionOwnerToken | undefined,
+  running: readonly WorkflowJobState[],
   now: number,
 ): string[] {
   const rows: string[] = [];
-  for (const st of workflowJobRegistry.values()) {
-    if (!workflowJobBelongsToOwner(st, owner)) continue;
-    if (st.status !== "running") continue;
+  for (const st of running) {
     const s = st.snapshot;
     const usage = presentWorkflowUsage(s.usage);
     const liveUsage = presentWorkflowUsage(s.liveUsage);
@@ -1206,12 +1206,10 @@ function formatWorkflowWidgetRows(
 }
 
 function aggregateWorkflowFooterUsage(
-  owner: SessionOwnerToken | undefined,
+  running: readonly WorkflowJobState[],
 ): WorkflowUsage | undefined {
   let aggregate = zeroWorkflowUsage();
-  for (const job of workflowJobRegistry.values()) {
-    if (!workflowJobBelongsToOwner(job, owner)) continue;
-    if (job.status !== "running") continue;
+  for (const job of running) {
     aggregate = addAggregateWorkflowUsage(aggregate, job.snapshot.usage);
   }
   return hasWorkflowUsage(aggregate) ? aggregate : undefined;

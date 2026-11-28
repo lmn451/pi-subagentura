@@ -1080,6 +1080,15 @@ describe("pollArtifactChanges", () => {
     });
 
     await mod.pollArtifactChanges({} as any, ownerA);
+    const rowsA = sharedUi.setWidget.mock.calls
+      .filter(([key]) => key === "subagentura-workflow-activity")
+      .at(-1)?.[1];
+    expect(rowsA).toHaveLength(1);
+    expect(rowsA[0]).toContain("flow-a");
+    expect(sharedUi.setStatus).toHaveBeenCalledWith(
+      "subagentura-workflows",
+      "⚡ 1 workflow running · ↑4 ↓2 R1 W0 $0.01",
+    );
     await mod.pollArtifactChanges({} as any, ownerB);
 
     const workflowFooterCalls = sharedUi.setStatus.mock.calls.filter(
