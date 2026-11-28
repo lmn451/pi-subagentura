@@ -1,6 +1,6 @@
 /**
  * Tests for session_shutdown state-file behavior:
- * deletion on /new, preservation on quit/reload/resume,
+ * scoped retirement on /new, preservation on quit/reload/resume,
  * pane preservation on reload, defensive guard for missing ctx.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -36,7 +36,7 @@ interface ExtensionFixture {
   scope: SessionScope;
 }
 
-describe("session_shutdown clean-slate on /new and quit", () => {
+describe("session_shutdown scoped retirement on /new and quit", () => {
   let cwd: string;
 
   beforeEach(() => {
@@ -88,7 +88,7 @@ describe("session_shutdown clean-slate on /new and quit", () => {
     return ctx;
   }
 
-  it("deletes state on final /new shutdown without touching a live peer", async () => {
+  it("retires outgoing rows on /new without touching a live peer", async () => {
     appendInteractiveState(cwd, {
       id: "abc12345",
       paneId: "%42",
@@ -135,11 +135,46 @@ describe("session_shutdown clean-slate on /new and quit", () => {
       { type: "session_shutdown", reason: "new" },
       peerCtx,
     );
-    expect(loadInteractiveStates(cwd)).toBeNull();
+    expect(loadInteractiveStates(cwd)?.states["abc12345"]).toBeDefined();
     expect(peer.scope.interactiveStates.size).toBe(0);
   });
 
-  it("deletes routing metadata on /new shutdown", async () => {
+  it("preserves persisted peer recovery state on /new when only the outgoing scope is live", async () => {
+    const outgoingRow = {
+      id: "persisted-owner",
+      paneId: "%43",
+      mux: "tmux" as const,
+      artifactDir: join(cwd, "persisted-owner"),
+      sessionFile: "/tmp/owner-sess.jsonl",
+      parentSessionId: "session-owner",
+      eventByteCursor: 123,
+    };
+    const peerRow = {
+      id: "persisted-peer",
+      paneId: "%44",
+      mux: "tmux" as const,
+      artifactDir: join(cwd, "persisted-peer"),
+      sessionFile: "/tmp/peer-sess.jsonl",
+      parentSessionId: "session-peer",
+      eventByteCursor: 456,
+    };
+    appendInteractiveState(cwd, outgoingRow);
+    appendInteractiveState(cwd, peerRow);
+    expect(loadInteractiveStates(cwd)?.schemaVersion).toBe(2);
+
+    const outgoing = await setupExtension();
+    const outgoingCtx = startSession(outgoing, "new", "session-owner");
+    outgoing.shutdownHandlers.at(-1)!(
+      { type: "session_shutdown", reason: "new" },
+      outgoingCtx,
+    );
+
+    const persisted = loadInteractiveStates(cwd);
+    expect(persisted?.states[peerRow.id]).toMatchObject(peerRow);
+    expect(persisted?.states[outgoingRow.id]).toBeUndefined();
+  });
+
+  it("preserves advisory routing metadata on /new shutdown", async () => {
     upsertOrchestratorRoutingEntry(cwd, {
       childId: "0123456789abcdef",
       description: "Own the routing cleanup regression",
@@ -155,7 +190,7 @@ describe("session_shutdown clean-slate on /new and quit", () => {
       ctx,
     );
 
-    expect(existsSync(routingFile)).toBe(false);
+    expect(existsSync(routingFile)).toBe(true);
   });
 
   it("session_shutdown with reason='quit' KEEPS the state file (rehydrate depends on it)", async () => {
@@ -268,13 +303,14 @@ describe("session_shutdown clean-slate on /new and quit", () => {
     );
   });
 
-  it("session_shutdown is a no-op for the state file when ctx.cwd is missing", async () => {
+  it("fresh shutdown uses the outgoing scope cwd when ctx is missing", async () => {
     appendInteractiveState(cwd, {
       id: "abc12345",
       paneId: "%42",
       mux: "tmux",
       artifactDir: join(cwd, "abc12345"),
       sessionFile: "/tmp/sess.jsonl",
+      parentSessionId: "pi",
     });
     const extension = await setupExtension();
     startSession(extension);
@@ -284,7 +320,6 @@ describe("session_shutdown clean-slate on /new and quit", () => {
         undefined,
       ),
     ).not.toThrow();
-    // File is unchanged because ctx was undefined — defensive guard.
-    expect(loadInteractiveStates(cwd)).not.toBeNull();
+    expect(loadInteractiveStates(cwd)).toBeNull();
   });
 });

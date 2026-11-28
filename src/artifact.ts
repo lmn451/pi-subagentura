@@ -2590,6 +2590,8 @@ export function updatePersistedTelemetrySession(
     } else {
       throw stateLoadError(cwd, result);
     }
+    // The shared file has one correlation slot. Only its owner can replace or clear it.
+    if (current.telemetry && current.parent !== parentSessionId) return;
     current.parent = parentSessionId;
     current.telemetry = telemetry;
     writeInteractiveStatesUnlocked(cwd, current);
@@ -2645,15 +2647,41 @@ export function removeInteractiveState(cwd: string, id: string): void {
   });
 }
 /**
- * Delete the state file outright. Used on session_shutdown(reason="new") to
- * give the next session a clean slate. No-op if the file doesn't exist.
+ * Retire only rows and telemetry owned by one parent session.
+ * Invalid state is left untouched so a fresh session cannot erase recovery
+ * data it cannot safely attribute.
  */
-export function deleteInteractiveStatesFile(cwd: string): void {
+export function removeInteractiveStatesForParent(
+  cwd: string,
+  parentSessionId: string | undefined,
+): void {
+  // Taking the lock creates .pi/. There is nothing to retire without a state file.
+  if (!parentSessionId || !existsSync(stateFilePath(cwd))) return;
   withInteractiveStateLock(cwd, () => {
-    try {
-      unlinkSync(stateFilePath(cwd));
-    } catch {
-      /* best effort — file may not exist */
+    const result = loadInteractiveStatesResult(cwd);
+    if (result.kind === "missing") return;
+    if (result.kind === "invalid") throw stateLoadError(cwd, result);
+    const current = result.payload;
+    let changed = false;
+    let hasRemainingRows = false;
+    for (const [id, entry] of Object.entries(current.states)) {
+      if (entry.parentSessionId === parentSessionId) {
+        delete current.states[id];
+        changed = true;
+      } else {
+        hasRemainingRows = true;
+      }
+    }
+    if (current.parent === parentSessionId && current.telemetry !== undefined) {
+      delete current.telemetry;
+      changed = true;
+    }
+
+    if (!changed) return;
+    if (hasRemainingRows || current.telemetry !== undefined) {
+      writeInteractiveStatesUnlocked(cwd, current);
+    } else {
+      rmSync(stateFilePath(cwd), { force: true });
     }
   });
 }

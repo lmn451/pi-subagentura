@@ -655,22 +655,73 @@ describe("session handler lifecycle callbacks", () => {
     );
   });
 
-  it.each(["new", "fork"] as const)(
-    "replaces stale persisted telemetry on fresh %s",
-    (reason) => {
-      const staleId = "22222222-2222-4222-8222-222222222222";
-      updatePersistedTelemetrySession(root, "session-a", {
-        correlationId: staleId,
-        mode: "orchestrator",
-      });
-      const registration = registerHandlers();
-
-      startSession(registration, root, "session-b", undefined, reason);
-
-      expect(registration.sessionScope.telemetry?.correlationId).not.toBe(
-        staleId,
+  it.each([
+    ["new", false],
+    ["new", true],
+    ["fork", false],
+    ["fork", true],
+  ] as const)(
+    "preserves peer recovery across %s with incoming telemetry %s",
+    (reason, enabled) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response(null, { status: 200 })),
       );
-      expect(loadInteractiveStates(root)?.telemetry).toBeUndefined();
+      const outgoing = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        false,
+      );
+      const ctx = startSession(outgoing, root, "outgoing");
+      const peer = {
+        correlationId: "22222222-2222-4222-8222-222222222222",
+        mode: "orchestrator" as const,
+      };
+      appendInteractiveState(root, {
+        id: "peer-row",
+        paneId: "%2",
+        mux: "tmux",
+        artifactDir: join(root, "peer-row"),
+        sessionFile: join(root, "peer.jsonl"),
+        parentSessionId: "peer",
+      });
+      updatePersistedTelemetrySession(root, "peer", peer);
+      const before = loadInteractiveStates(root);
+      expect(before).toMatchObject({
+        parent: "peer",
+        telemetry: peer,
+        states: { "peer-row": { parentSessionId: "peer" } },
+      });
+      outgoing.handlers.get("session_shutdown")![0]({ reason }, ctx);
+      expect(loadInteractiveStates(root)).toEqual(before);
+      const incoming = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        enabled,
+      );
+      startSession(incoming, root, "incoming", undefined, reason);
+      expect(incoming.sessionScope.telemetry?.enabled).toBe(enabled);
+      expect(incoming.sessionScope.telemetry?.correlationId).not.toBe(
+        peer.correlationId,
+      );
+      expect(loadInteractiveStates(root)).toEqual(before);
+    },
+  );
+  it.each(["fork", "new"])(
+    "leaves an untouched project unchanged across %s",
+    (reason) => {
+      const registration = registerHandlers(
+        undefined,
+        true,
+        "orchestratorv2",
+        false,
+      );
+      const ctx = startSession(registration, root, "outgoing");
+      registration.handlers.get("session_shutdown")![0]({ reason }, ctx);
+      startSession(registration, root, "incoming", undefined, reason);
+      expect(existsSync(join(root, ".pi"))).toBe(false);
     },
   );
 

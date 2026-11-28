@@ -865,10 +865,10 @@ Shutdown ordering prevents late cross-session delivery:
 4. remove owner-scoped interactive states before killing panes, preserving standalone panes on `reload`, `resume`, or `quit`; workflow-owned panes are cleaned up with their workflow generation;
 5. abort and remove owner-scoped in-process jobs;
 6. mark the scope shut down, advance its generation, and remove it from the session-scope registry;
-7. restore active globals to the latest remaining scope;
-8. if another scope remains, leave the global interval running and return;
-9. on final shutdown, clear the global interval;
-10. delete durable interactive state only for shutdown reason `new`.
+7. for `new` or `fork`, under the state-file lock, retire only rows whose persisted `parentSessionId` exactly matches the outgoing parent; remove its telemetry header only if it also matches, preserve all other rows (including peer-process rows), and leave the shared `.pi/subagentura-routing.json` cache untouched;
+8. restore active globals to the latest remaining scope;
+9. if another scope remains, leave the global interval running and return;
+10. on final shutdown, clear the global interval.
 
 Shutdown clears the live coordinator after recording lifecycle retirements; it does not truncate or delete consumption receipt ledgers. Replacement sessions therefore leave old private ledger files on disk, but a new owner does not import them because the ledger identity is session-scoped.
 
