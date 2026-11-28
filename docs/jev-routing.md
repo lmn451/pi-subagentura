@@ -279,6 +279,24 @@ Advice does not reserve a child. Messaging checks still apply; surface failed
 sends rather than silently spawning replacements. Virtual-model chat routing is
 a separate Pi feature and is not enabled by this integration.
 
+### Check a proposed handoff against one child's responsibility
+
+When routing advice is enabled, use `resolve_orchestrator_route` with
+`scopeCheckChildId` and a minimal classifier-safe `routingDescription` to
+check a selected child's scope. For example, check “Implement the parser fix”
+against a child whose confirmed responsibility is read-only parser review.
+Do not include the worker message or use `task` or `part` in this mode.
+If the scope cannot be described safely, do not call the classifier.
+
+Only the selected eligible child is offered, without discovery aliases.
+Classifier-bound free text, including task descriptions and generated criteria,
+is scrubbed of known eligible sibling IDs. The IDs are not added as a list.
+The result has `status: scope_advice`. `fit` means the description fits; `mismatch`
+means it does not; `uncertain` means the evidence is insufficient. Errors and
+cancellation are not judgments about fit. This opt-in check is separate from
+owner selection, never runs automatically on send, and cannot change a child's
+permissions. It neither dispatches work nor recommends a replacement.
+
 ## Payload, privacy, and accounting
 
 Use `routingDescription` for **only** the minimal action, scope, deliverable,
