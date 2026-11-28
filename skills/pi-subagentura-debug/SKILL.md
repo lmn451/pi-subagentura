@@ -59,11 +59,11 @@ Herdr, or other terminal.
    it was omitted or explicitly set.
 2. **Prove process and terminal identity.** From read-only process inspection
    of the affected Pi PID and its ancestry, record PID, PPID, TTY, and command
-   name. With a valid mux candidate, macOS first reads `ps -axo pid=,ppid=`;
-   Linux follows parent links with `ps -p PID -o pid=,ppid=`. Both then read
-   TTY and command names only for Pi and its ancestors. The links must agree
-   in both observations within one 1.5-second process-inspection budget.
-   An ancestry failure stops the selector
+   name. On macOS with a valid Herdr Core candidate, the selector first reads
+   `ps -axo pid=,ppid=`, then reads TTY and command names only for Pi and its
+   ancestors. The links must agree in both snapshots within one 1.5-second
+   process-inspection budget. Other macOS and Linux paths use
+   `ps -axo pid=,ppid=,tty=,comm=`. An ancestry failure stops the selector
    before host verification; it does not establish a host CLI failure.
    Keep raw output private. Check optional host markers by presence only, not
    by value: for example `HC_TERMINAL_ID` / `HC_TERMINAL_SOCKET`, `HERDR_ENV` /

@@ -137,7 +137,9 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
 }
 
 function inspectionScope(targets: LiveMuxTarget[]) {
-  return targets.length ? "ancestry" : "all";
+  return targets.some((target) => target.mux === "herdr-core")
+    ? "ancestry"
+    : "all";
 }
 
 /** Resolve ownership, not focus or an inherited environment-marker priority. */

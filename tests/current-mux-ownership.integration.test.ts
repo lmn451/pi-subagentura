@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawn } from "node:child_process";
 import { resolveCurrentMuxContext } from "../src/multiplexer-current-context";
 import type { MuxName } from "../src/multiplexer-contracts";
-import { muxPsFixture } from "./mux-ps-fixture";
 
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
@@ -27,20 +26,17 @@ function installNested(
   outer: MuxName,
   options: { panePid?: number; callerTty?: string } = {},
 ): void {
-  vi.mocked(execFileSync).mockImplementation((file, args) => {
+  vi.mocked(execFileSync).mockImplementation((file) => {
     if (file === "ps")
-      return muxPsFixture(
-        [
-          `${process.pid} 101 ${options.callerTty ?? "pts/2"} node`,
-          "101 100 pts/2 sh",
-          `100 91 pts/1 ${inner}`,
-          "91 90 pts/1 sh",
-          `90 1 ? ${outer}`,
-          "1 0 ? init",
-          "",
-        ].join("\n"),
-        args ?? [],
-      );
+      return [
+        `${process.pid} 101 ${options.callerTty ?? "pts/2"} node`,
+        "101 100 pts/2 sh",
+        `100 91 pts/1 ${inner}`,
+        "91 90 pts/1 sh",
+        `90 1 ? ${outer}`,
+        "1 0 ? init",
+        "",
+      ].join("\n");
     const panePid = options.panePid ?? (file === inner ? 101 : 91);
     if (file === "tmux")
       return `%4\t${panePid}\t/dev/pts/${panePid === 101 ? 2 : 1}\n`;

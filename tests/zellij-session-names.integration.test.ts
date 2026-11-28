@@ -4,7 +4,6 @@ import {
   resolveCurrentMuxContext,
   resolveCurrentMuxContextAsync,
 } from "../src/multiplexer-current-context";
-import { muxPsFixture } from "./mux-ps-fixture";
 
 const { exec, sync, forbidden, unexpected } = vi.hoisted(() => ({
   exec: vi.fn<
@@ -45,15 +44,14 @@ function respond(
   args: readonly string[],
   session: string,
 ): string {
-  if (command === "ps") {
+  if (command === "ps" && JSON.stringify(args) === JSON.stringify(psArgs)) {
     const shellPid = process.pid + 100;
     const muxPid = process.pid + 101;
-    return muxPsFixture(
+    return (
       "1 0 ? /sbin/init\n" +
-        `${muxPid} 1 pts/2 /usr/bin/zellij\n` +
-        `${shellPid} ${muxPid} pts/2 /bin/sh\n` +
-        `${process.pid} ${shellPid} pts/2 /usr/bin/node\n`,
-      args,
+      `${muxPid} 1 pts/2 /usr/bin/zellij\n` +
+      `${shellPid} ${muxPid} pts/2 /bin/sh\n` +
+      `${process.pid} ${shellPid} pts/2 /usr/bin/node\n`
     );
   }
   if (
@@ -121,13 +119,13 @@ describe.each(modes)("%s Zellij session-name resolver integration", (mode) => {
       const active = mode === "sync" ? sync : exec;
       const inactive = mode === "sync" ? exec : sync;
       expect(inactive).not.toHaveBeenCalled();
-      expect(active).toHaveBeenCalledTimes(6);
+      expect(active).toHaveBeenCalledTimes(2);
       expect(active.mock.calls[0]?.slice(0, 3)).toEqual([
         "ps",
-        ["-p", String(process.pid), "-o", "pid=,ppid="],
+        psArgs,
         expect.objectContaining({ shell: false }),
       ]);
-      expect(active.mock.calls[5]?.slice(0, 3)).toEqual([
+      expect(active.mock.calls[1]?.slice(0, 3)).toEqual([
         "zellij",
         ["--session", session, "action", "list-panes", "--json"],
         expect.objectContaining({ shell: false, env }),
