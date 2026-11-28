@@ -189,9 +189,9 @@ describe("composed native split and privacy guidance", () => {
       expect(prompt).toContain("Only on `split_needed`");
       expect(prompt).toContain("even with zero eligible children");
       expect(prompt).toContain("a single handoff, not a split");
-      expect(prompt).toContain("Never split a part again");
+      expect(prompt).toContain("Repeat this assessment at every level");
       expect(prompt).toContain(
-        "On `no_match`, including `low_confidence` or `ambiguous`, apply the base owner-selection policy to the assessed whole request or part. When that policy calls for creation, create exactly one child for that scope without splitting.",
+        "Only a confident match or new-child recommendation confirms readiness for one owner.",
       );
       expect(prompt).toContain(
         "Do not guess a split or handoff from an error or unavailable result.",
@@ -243,11 +243,14 @@ describe("registered split advisor with a stub classifier", () => {
       expect(
         (await call(advisor, { routingDescription: apiWork, part: true }))
           .details.decision,
-      ).toEqual({
+      ).toMatchObject({
         kind: "no_match",
         reason: "new_child_recommended",
       });
-      expect(modelRegistry.classify).toHaveBeenCalledOnce();
+      expect(modelRegistry.classify).toHaveBeenCalledTimes(2);
+      modelRegistry.classify.mockResolvedValueOnce(
+        classifierResult("none", { split: 0.05, none: 0.95 }),
+      );
       expect(
         (await call(advisor, { routingDescription: whole })).details.decision,
       ).toMatchObject({
@@ -294,11 +297,12 @@ describe("registered split advisor with a stub classifier", () => {
       addOwner(scenario, releaseId, "Own release packaging verification");
       modelRegistry.classify.mockImplementation(async (_model, context) => {
         const offered = Object.keys(context.questions.route.criteria);
-        const choice = offered.includes("split")
-          ? "split"
-          : context.state.task === apiWork
-            ? "candidate_0"
-            : "candidate_1";
+        const choice =
+          context.state.task === whole
+            ? "split"
+            : context.state.task === apiWork
+              ? "candidate_0"
+              : "candidate_1";
         return classifierResult(
           choice,
           Object.fromEntries(
@@ -340,6 +344,7 @@ describe("registered split advisor with a stub classifier", () => {
         expect(choices(modelRegistry, index)).toEqual([
           "candidate_0",
           "candidate_1",
+          "split",
           "none",
         ]);
         expect(expectSafePayload(scenario, index, description)).not.toContain(
@@ -363,12 +368,40 @@ describe("registered split advisor with a stub classifier", () => {
     },
   );
 
-  it("rejects a classifier trying to split a part again", async () => {
+  it("stops recursive assessments at the request budget", async () => {
+    const s = await setup("forced");
+    s.modelRegistry.classify.mockResolvedValue(
+      classifierResult("split", { split: 0.95, none: 0.05 }),
+    );
+    for (let i = 0; i < 32; i++)
+      expect(
+        (
+          await s.call(advisor, {
+            routingDescription: `Review area ${i}`,
+            part: i > 0,
+          })
+        ).details.decision.kind,
+      ).toBe("split_needed");
+    expect(
+      (await s.call(advisor, { routingDescription: apiWork, part: true }))
+        .details.decision,
+    ).toEqual({ kind: "error", reason: "planning_limit" });
+    expect(s.modelRegistry.classify).toHaveBeenCalledTimes(32);
+  });
+
+  it("recursively assesses a part before recommending a leaf handoff", async () => {
     const scenario = await setup("forced");
     addOwner(scenario, apiId, "Own API compatibility review");
     scenario.modelRegistry.classify.mockResolvedValueOnce(
       classifierResult("split", { candidate_0: 0.02, split: 0.95, none: 0.03 }),
     );
+    scenario.modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult("split", { candidate_0: 0.02, split: 0.95, none: 0.03 }),
+    );
+    expect(
+      (await scenario.call(advisor, { routingDescription: whole })).details
+        .decision.kind,
+    ).toBe("split_needed");
     expect(
       (
         await scenario.call(advisor, {
@@ -376,11 +409,27 @@ describe("registered split advisor with a stub classifier", () => {
           part: true,
         })
       ).details.decision,
-    ).toEqual({
-      kind: "error",
-      reason: "invalid_response",
+    ).toMatchObject({ kind: "split_needed" });
+    scenario.modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult("candidate_0", {
+        candidate_0: 0.98,
+        split: 0.01,
+        none: 0.01,
+      }),
+    );
+    expect(
+      (
+        await scenario.call(advisor, {
+          part: true,
+          routingDescription: "Inspect one API signature",
+        })
+      ).details,
+    ).toMatchObject({
+      readyForOneOwner: true,
+      decision: { kind: "match", childId: apiId },
     });
-    expect(choices(scenario.modelRegistry)).toEqual(["candidate_0", "none"]);
+    expect(send).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
   });
 
   it.each(["optional", "forced"] as const)(
@@ -470,9 +519,8 @@ describe("registered split advisor with a stub classifier", () => {
     expect(
       (await call(advisor, { routingDescription: apiWork, part: true })).details
         .decision,
-    ).toMatchObject({ reason: "new_child_recommended" });
-    expect(choices(modelRegistry, 1)).toHaveLength(62);
-    expect(choices(modelRegistry, 1)).not.toContain("split");
+    ).toMatchObject({ reason: "payload_too_large" });
+    expect(modelRegistry.classify).toHaveBeenCalledOnce();
   });
 });
 it.each(["optional", "forced"] as const)(

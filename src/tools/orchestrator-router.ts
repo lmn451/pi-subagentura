@@ -92,6 +92,7 @@ const ROUTING_ERROR_REASONS: ReadonlySet<string> = new Set([
   "invalid_config",
   "invalid_input",
   "payload_too_large",
+  "planning_limit",
   "timeout",
   "unavailable",
   "invalid_response",
@@ -198,6 +199,10 @@ export function registerOrchestratorRouterTool(
   return true;
 }
 
+const splitBudgets = new WeakMap<
+  SessionScope,
+  { owner: ReturnType<typeof sessionOwner>; requestId?: string; calls: number }
+>();
 async function resolveOrchestratorRoute(params: {
   pi: ExtensionAPI;
   toolToken: SessionToolToken | undefined;
@@ -206,10 +211,7 @@ async function resolveOrchestratorRoute(params: {
   ctx: unknown;
   forceJev: boolean;
   createEngine?: () => RoutingEngine | undefined;
-}): Promise<{
-  content: [{ type: "text"; text: string }];
-  details: { status: "advice"; decision: RoutingDecision };
-}> {
+}): Promise<RoutingAdviceResult> {
   let decision: RoutingDecision;
   if (
     !isOrchestratorV2Enabled(params.pi) ||
@@ -307,7 +309,7 @@ async function resolveOrchestratorRoute(params: {
   ) {
     return routingAdviceResult(errorDecision("incomplete_registry"));
   }
-  const assessSplit = split && params.params.part !== true;
+  const assessSplit = split;
   if (initialCandidates.length === 0 && !assessSplit) {
     return routingAdviceResult({
       kind: "no_match",
@@ -331,6 +333,20 @@ async function resolveOrchestratorRoute(params: {
   try {
     const engine = params.createEngine?.();
     if (!engine) return routingAdviceResult(errorDecision("unavailable"));
+    if (assessSplit) {
+      let budget = splitBudgets.get(scope);
+      if (
+        !budget ||
+        budget.owner.generation !== owner.generation ||
+        budget.requestId !== requestIdentity?.id
+      ) {
+        budget = { owner, requestId: requestIdentity?.id, calls: 0 };
+        splitBudgets.set(scope, budget);
+      }
+      if (budget.calls >= 32)
+        return routingAdviceResult(errorDecision("planning_limit"));
+      budget.calls++;
+    }
     engineDecision = await engine.decide(input, params.signal);
   } catch {
     if (params.signal?.aborted) {
@@ -426,7 +442,7 @@ async function resolveOrchestratorRoute(params: {
     return routingAdviceResult(errorDecision("incomplete_registry"));
   }
 
-  return routingAdviceResult(decision);
+  return routingAdviceResult(decision, assessSplit);
 }
 
 function routingAuthoritySnapshot(
@@ -860,26 +876,59 @@ function errorDecision(reason: RoutingErrorReason): RoutingDecision {
   return { kind: "error", reason };
 }
 
-function routingAdviceResult(decision: RoutingDecision): {
+type ReadyDecision =
+  | Extract<RoutingDecision, { kind: "match" }>
+  | (Extract<RoutingDecision, { kind: "no_match" }> & {
+      reason: "new_child_recommended";
+    });
+type AdviceDetails = { status: "advice" } & (
+  | { decision: ReadyDecision; readyForOneOwner: true }
+  | { decision: RoutingDecision; readyForOneOwner?: never }
+);
+interface RoutingAdviceResult {
   content: [{ type: "text"; text: string }];
-  details: { status: "advice"; decision: RoutingDecision };
-} {
-  const text =
-    decision.kind === "split_uncertain"
-      ? "Ask the user whether to split the request. Do not split, send, or create a child until the user answers."
-      : decision.kind === "split_needed"
-        ? "Separate the independent parts. Resolve each part with part=true and its own safe routingDescription. If no safe description is sufficient, abstain for that part. Send only the authorized part to its owner, not the combined request."
-        : decision.kind === "match"
-          ? `Routing advisor selected existing child ${decision.childId}.`
-          : decision.kind === "no_match"
-            ? decision.reason === "new_child_recommended"
-              ? "Routing advisor recommends creating a new child for this task; this is advice only."
-              : `Routing advisor abstained (${decision.reason}).`
-            : decision.kind === "cancelled"
-              ? "Routing advisor cancelled this routing request."
-              : `Routing advisor could not decide (${decision.reason}).`;
+  details: AdviceDetails;
+}
+function isReadyDecision(decision: RoutingDecision): decision is ReadyDecision {
+  return (
+    decision.kind === "match" ||
+    (decision.kind === "no_match" &&
+      decision.reason === "new_child_recommended")
+  );
+}
+function adviceText(decision: RoutingDecision): string {
+  switch (decision.kind) {
+    case "split_uncertain":
+      return "Ask the user whether to split the request. Do not split, send, or create a child until the user answers.";
+    case "split_needed":
+      return "Separate the independent parts. Resolve each part with part=true and its own safe routingDescription. Do not dispatch intermediate tasks.";
+    case "match":
+      return `Routing advisor selected existing child ${decision.childId}.`;
+    case "no_match":
+      return decision.reason === "new_child_recommended"
+        ? "Routing advisor recommends creating a new child for this task; this is advice only."
+        : `Routing advisor abstained (${decision.reason}).`;
+    case "cancelled":
+      return "Routing advisor cancelled this routing request.";
+    case "error":
+      return `Routing advisor could not decide (${decision.reason}).`;
+  }
+}
+function routingAdviceResult(
+  decision: RoutingDecision,
+  assessSplit = false,
+): RoutingAdviceResult {
+  const details: AdviceDetails =
+    assessSplit && isReadyDecision(decision)
+      ? { status: "advice", decision, readyForOneOwner: true }
+      : { status: "advice", decision };
   return {
-    content: [{ type: "text", text: `${text}\n${JSON.stringify(decision)}` }],
-    details: { status: "advice", decision },
+    content: [
+      {
+        type: "text",
+        text: `${adviceText(decision)}\n${JSON.stringify(decision)}`,
+      },
+    ],
+    details,
   };
 }

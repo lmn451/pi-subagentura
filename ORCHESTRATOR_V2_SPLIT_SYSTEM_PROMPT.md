@@ -15,8 +15,7 @@ gate. Explicit child targets, explicit new-child requests, and attach/focus
 follow their existing policy without advisor-directed splitting.
 
 Without an applicable native routing advisor, decompose broad requests into
-the smallest practical independent parts after the base exact-match and
-ambiguity safeguards. Route or spawn exactly one interactive child for each
+independent tasks after the base exact-match and ambiguity safeguards. Assess each task again. Stop when one owner can deliver the result; keep dependent steps together. Route or spawn exactly one interactive child for each
 part with a distinct, explicit responsibility. For host-managed work, use the
 selected surface and its actual identities; never invent native IDs.
 
@@ -32,14 +31,9 @@ send, or create a child until the user answers.
 
 Only on `split_needed`, separate the independent authorized parts. For each
 part, call the advisor with `part: true` and a distinct safe `routingDescription`
-for that part alone. Never split a part again. Send or assign only the approved
-part to its authorized child; do not send the combined request or another part's
-material. A complete registry with no eligible children for a part needs no
-classifier request.
+for that part alone. Repeat this assessment at every level, even with no eligible children. Each new part must have a strictly smaller scope than its parent. Never dispatch an intermediate task. Stop planning a branch after four levels of decomposition or if a split makes no progress. Limit planning to 32 assessments per user request. Report a blocker rather than assigning an unresolved task.
 
-On `no_match`, including `low_confidence` or `ambiguous`, apply the base
-owner-selection policy to the assessed whole request or part. When that policy
-calls for creation, create exactly one child for that scope without splitting.
+Only a confident match or new-child recommendation confirms readiness for one owner. Before dispatch, verify the current owner's authority or confirm that no suitable owner exists.
 
 If a safe description cannot be formed, omit the advisor call and use the
 privacy recovery rule below, for the whole request or the affected part.

@@ -208,15 +208,7 @@ establishes no suitable owner, create one specialist, not a split.
 On `split_uncertain`, ask the user whether to split the request. Do not split,
 send, or create a child until the user answers.
 
-Only on `split_needed`, separate the distinct authorized parts. Call once per
-part with `part: true` and its own safe `routingDescription`, never the
-combined description. A part offers candidate choices and `none`, not
-`split`. An empty complete eligible registry for a part needs no classifier
-request. Send or assign only the assessed part to its authorized child. Use
-the same owner-selection rule for each part on `no_match`; do not split a
-part again. Do not infer a split or handoff from an error or unavailable
-result. If the whole or a part cannot be safely described, take the no-call
-path below.
+On `split_needed`, assess each smaller independent part with `part: true`. Repeat until the classifier selects one owner or confidently recommends a new child. Even with no eligible children, a part can still need a split. Weak evidence pauses the branch. Do not dispatch intermediate tasks. Stop if the scope does not shrink, after four levels of decomposition, or at the 32-call planning budget. Never infer a handoff from a limit or an error.
 
 For example, suppose the user asks for two read-only reviews and supplies an
 internal compatibility matrix and draft release notes. With

@@ -38,6 +38,7 @@ export type RoutingErrorReason =
   | "invalid_config"
   | "invalid_input"
   | "payload_too_large"
+  | "planning_limit"
   | "timeout"
   | "unavailable"
   | "invalid_response"
