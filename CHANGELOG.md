@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Scope `new`/`fork` persisted-state retirement to the outgoing parent's exact
+  rows under the state lock, preserving peer recovery and the shared routing
+  cache.
+
 ## [4.4.0] - 2026-11-19
 
 ### Added

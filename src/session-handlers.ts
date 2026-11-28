@@ -9,10 +9,9 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
-  deleteInteractiveStatesFile,
   hasPersistedTelemetryField,
   loadInteractiveStates,
-  removeInteractiveState,
+  removeInteractiveStatesForParent,
   updateInteractiveStates,
   updatePersistedTelemetrySession,
 } from "./artifact";
@@ -44,10 +43,7 @@ import {
   type ParsedSpawnTreeContext,
 } from "./spawn-tree-context";
 import { rehydrateInteractiveSubagents } from "./rehydrate";
-import {
-  deleteOrchestratorRoutingFile,
-  loadOrchestratorRoutingMetadata,
-} from "./orchestrator-routing";
+import { loadOrchestratorRoutingMetadata } from "./orchestrator-routing";
 import {
   cancelInteractiveSubagentByState,
   removeInteractiveSubagentState,
@@ -363,19 +359,24 @@ function cleanupScopeGeneration(
   lifecycleOrigin: "session_start" | "session_shutdown",
   ctx?: ExtensionContext,
 ): void {
-  const sessionId = sessionIdForScope(scope, ctx?.sessionManager);
+  const sessionId = sessionIdForScope(
+    scope,
+    lifecycleOrigin === "session_shutdown" ? ctx?.sessionManager : undefined,
+  );
   const reason = `${lifecycleOrigin} (${event?.reason ?? "unknown"})`;
   snapshotOwnedJobs(scope, sessionId, ctx?.cwd, reason);
-  cleanupWorkflowJobsForOwner(
-    owner,
-    event?.reason === "new" || event?.reason === "fork"
-      ? "fresh_session"
-      : "session_shutdown",
-  );
-
   const destroysStandalonePanes =
     event?.reason === "new" || event?.reason === "fork";
+  const persistedStateCwds =
+    destroysStandalonePanes && sessionId ? new Set<string>() : undefined;
+  if (scope.cwd) persistedStateCwds?.add(scope.cwd);
+  cleanupWorkflowJobsForOwner(
+    owner,
+    destroysStandalonePanes ? "fresh_session" : "session_shutdown",
+  );
+
   for (const state of [...scope.interactiveStates.values()]) {
+    persistedStateCwds?.add(state.cwd);
     const destroysPane =
       destroysStandalonePanes || isInMemoryWorkflowPane(state);
     const cancelsActivePane =
@@ -405,11 +406,15 @@ function cleanupScopeGeneration(
         });
       }
     }
-    if (event?.reason === "new" || event?.reason === "fork") {
+  }
+  if (sessionId && persistedStateCwds) {
+    for (const cwd of persistedStateCwds) {
       try {
-        removeInteractiveState(state.cwd, state.id);
-      } catch {
-        /* preserve peer entries even when one stale row cannot be removed */
+        removeInteractiveStatesForParent(cwd, sessionId);
+      } catch (error) {
+        debugLog("warn", "interactive_lifecycle_state_retirement_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }
@@ -762,15 +767,6 @@ export function registerSessionHandlers(
         /* defensive */
       }
       globalState.__piSubagenturaInteractivePollerHandle = undefined;
-    }
-
-    if (event?.reason === "new" && ctx?.cwd) {
-      try {
-        deleteInteractiveStatesFile(ctx.cwd);
-        deleteOrchestratorRoutingFile(ctx.cwd);
-      } catch {
-        /* best effort */
-      }
     }
   });
 

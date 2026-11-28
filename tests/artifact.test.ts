@@ -21,7 +21,6 @@ import {
   appendInteractiveState,
   artifactPath,
   cleanupOldArtifacts,
-  deleteInteractiveStatesFile,
   ensureArtifactDir,
   eventLogEndOffset,
   hasPersistedTelemetryField,
@@ -43,6 +42,7 @@ import {
   readEventBatch,
   readEventRecords,
   readOutput,
+  removeInteractiveStatesForParent,
   removeInteractiveState,
   saveInteractiveStates,
   stateFilePath,
@@ -2023,6 +2023,10 @@ describe("persisted interactive state helpers", () => {
       updatePersistedTelemetrySession(root, "session-new", undefined),
     ).toThrow(/state file/i);
     expect(readFileSync(file)).toEqual(before);
+    expect(() => removeInteractiveStatesForParent(root, "parent-a")).toThrow(
+      /state file/i,
+    );
+    expect(readFileSync(file)).toEqual(before);
   });
 
   it("saveInteractiveStates creates the .pi/ directory if missing (mode 0o700)", () => {
@@ -2194,16 +2198,133 @@ describe("persisted interactive state helpers", () => {
     }
   });
 
-  it("deleteInteractiveStatesFile removes the file", () => {
-    appendInteractiveState(root, SAMPLE);
+  it("retires only exact parent rows, preserving peer and unattributed state", () => {
+    const peerDelivery = {
+      deliveryId: "peer-delivery",
+      subagentId: "peer12345",
+      turnId: "peer-turn",
+      eventId: "peer-event",
+      status: "done" as const,
+      artifactDir: "/tmp/artifacts/peer12345",
+      state: "queued" as const,
+      completionPolicy: "each" as const,
+    };
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "parent-peer",
+      telemetry: {
+        correlationId: "11111111-1111-4111-8111-111111111111",
+        mode: "straight",
+      },
+      states: {
+        owner1234: {
+          ...SAMPLE,
+          id: "owner1234",
+          parentSessionId: "parent-owner",
+          artifactDir: "/tmp/artifacts/owner1234",
+        },
+        peer12345: {
+          ...SAMPLE,
+          id: "peer12345",
+          artifactDir: "/tmp/artifacts/peer12345",
+          eventByteCursor: 456,
+          pendingDeliveries: [peerDelivery],
+          parentSessionId: "parent-peer",
+        },
+        free12345: {
+          ...SAMPLE,
+          id: "free12345",
+          artifactDir: "/tmp/artifacts/free12345",
+          eventByteCursor: 789,
+        },
+      },
+    });
 
-    deleteInteractiveStatesFile(root);
+    removeInteractiveStatesForParent(root, "parent-owner");
+
+    const loaded = loadInteractiveStates(root);
+    expect(loaded?.states.owner1234).toBeUndefined();
+    expect(loaded?.states.peer12345).toMatchObject({
+      eventByteCursor: 456,
+      pendingDeliveries: [peerDelivery],
+      parentSessionId: "parent-peer",
+    });
+    expect(loaded?.states.free12345).toMatchObject({
+      eventByteCursor: 789,
+    });
+    expect(loaded?.parent).toBe("parent-peer");
+    expect(loaded?.telemetry).toEqual({
+      correlationId: "11111111-1111-4111-8111-111111111111",
+      mode: "straight",
+    });
+  });
+
+  it("keeps peer telemetry when retiring the final owned row", () => {
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "parent-peer",
+      telemetry: {
+        correlationId: "11111111-1111-4111-8111-111111111111",
+        mode: "straight",
+      },
+      states: {
+        abc12345: {
+          ...SAMPLE,
+          parentSessionId: "parent-owner",
+        },
+      },
+    });
+
+    removeInteractiveStatesForParent(root, "parent-owner");
+
+    expect(existsSync(stateFilePath(root))).toBe(true);
+    expect(loadInteractiveStates(root)).toMatchObject({
+      parent: "parent-peer",
+      telemetry: {
+        correlationId: "11111111-1111-4111-8111-111111111111",
+        mode: "straight",
+      },
+      states: {},
+    });
+  });
+
+  it("unlinks the valid state file after retiring its final row and telemetry", () => {
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "parent-owner",
+      telemetry: {
+        correlationId: "11111111-1111-4111-8111-111111111111",
+        mode: "straight",
+      },
+      states: {
+        abc12345: {
+          ...SAMPLE,
+          parentSessionId: "parent-owner",
+        },
+      },
+    });
+
+    removeInteractiveStatesForParent(root, "parent-owner");
 
     expect(existsSync(stateFilePath(root))).toBe(false);
   });
 
-  it("deleteInteractiveStatesFile is a no-op when the file is absent", () => {
-    expect(() => deleteInteractiveStatesFile(root)).not.toThrow();
+  it("does not mutate state without a parent session ID", () => {
+    saveInteractiveStates(root, {
+      schemaVersion: 2,
+      parent: "parent-owner",
+      states: {
+        abc12345: {
+          ...SAMPLE,
+          parentSessionId: "parent-owner",
+        },
+      },
+    });
+    const before = readFileSync(stateFilePath(root));
+
+    removeInteractiveStatesForParent(root, undefined);
+
+    expect(readFileSync(stateFilePath(root))).toEqual(before);
   });
   it.each(["", ".recovery"])(
     "does not steal a live owner at recovery level %s",

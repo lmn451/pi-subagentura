@@ -216,17 +216,6 @@ export function orchestratorRoutingFilePath(cwd: string): string {
   return join(cwd, ".pi", "subagentura-routing.json");
 }
 
-/** Delete the project-local routing cache for an intentional fresh session. */
-export function deleteOrchestratorRoutingFile(cwd: string): void {
-  withInteractiveStateLock(cwd, () => {
-    try {
-      rmSync(orchestratorRoutingFilePath(cwd), { force: true });
-    } catch {
-      /* Best effort, matching interactive state cleanup semantics. */
-    }
-  });
-}
-
 export function routingProjectId(cwd: string): ProjectId {
   if (
     typeof cwd !== "string" ||

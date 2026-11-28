@@ -223,11 +223,14 @@ groups before polling.
 The `session_start` handler checks `event.reason` and rehydrates when the
 reason is `"startup"`, `"reload"`, or `"resume"`. This means subagents that
 survived a Ctrl+D (quit) will reappear in the registry on the next pi launch.
-On explicit fresh starts (`"new"`, `"fork"`) the state file is ignored — previous
-session's subagents should not pollute the new session's view. The state file is
-deleted on `session_shutdown(reason="new")` to give the next session a clean slate.
-On `session_shutdown(reason="quit")` the panes and state file are preserved so the
-subagents survive a restart.
+On explicit fresh starts (`"new"`, `"fork"`), the state file is ignored: the
+prior owner is never rehydrated. On shutdown for either reason, under the
+state-file lock, retire only rows whose persisted `parentSessionId` exactly
+matches the outgoing parent; remove its telemetry header only if it also
+matches. Preserve every other row, including rows written by peer processes in
+the same cwd, and do not remove the shared
+`.pi/subagentura-routing.json` cache. On `session_shutdown(reason="quit")`, panes
+and state are preserved so subagents survive a restart.
 
 Standalone interactive panes are preserved for continuity transitions (`startup`,
 `reload`, `resume`, and `quit`) and unknown lifecycle reasons. Automatic lifecycle
