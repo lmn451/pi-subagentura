@@ -200,12 +200,15 @@ for (const resolve of [
       expect(query).toHaveBeenCalledTimes(calls);
     },
   );
-  it(`${resolve.name}: keeps the existing Linux process read for Core`, async () => {
+  it(`${resolve.name}: uses only selected PIDs on Linux`, async () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("linux");
-    query.mockReturnValueOnce(details);
+    for (const row of links.trim().split("\n"))
+      query.mockReturnValueOnce(row + "\n");
     expect((await resolve(env)).kind).toBe("ready");
-    expect(query.mock.calls[0]?.[1]).toEqual(["-axo", "pid=,ppid=,tty=,comm="]);
-    expect(query.mock.calls.map(([file]) => file)).toEqual(["ps", "hc"]);
+    expect(query.mock.calls.slice(0, 4).map(([, args]) => args)).toEqual(
+      pids.split(",").map((pid) => ["-p", pid, "-o", "pid=,ppid="]),
+    );
+    expect(query.mock.calls.at(-1)?.[0]).toBe("hc");
   });
   it(`${resolve.name}: keeps incomplete Core markers unavailable`, async () => {
     query.mockReturnValueOnce(details);

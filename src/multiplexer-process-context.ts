@@ -112,14 +112,35 @@ function* inspectProcesses(
   scope: InspectionScope,
 ): Generator<Inspection, ProcessContext | undefined, string> {
   if (!supportedProcessPid(pid)) return undefined;
-  const scoped = scope === "ancestry" && process.platform === "darwin";
+  const scoped = scope === "ancestry";
   const deadline = performance.now() + INSPECTION_TIMEOUT_MS;
   let expected: ProcessLink[] | undefined;
   let args = ["-axo", DETAIL_FIELDS];
   let timeout = INSPECTION_TIMEOUT_MS;
   if (scoped) {
-    const links = yield { args: ["-axo", "pid=,ppid="], timeout };
-    expected = processChain(parseTable(links, parseLink), pid);
+    if (process.platform === "linux") {
+      const links = new Map<number, ProcessLink>();
+      let next = pid;
+      while (next !== 0) {
+        if (links.has(next) || links.size > MAX_ANCESTOR_LINKS)
+          return undefined;
+        const output = yield {
+          args: ["-p", String(next), "-o", "pid=,ppid="],
+          timeout,
+        };
+        const rows = parseTable(output, parseLink);
+        const link = rows?.get(next);
+        if (rows?.size !== 1 || !link) return undefined;
+        links.set(next, link);
+        next = link.parentPid;
+        timeout = Math.floor(deadline - performance.now());
+        if (timeout <= 0) return undefined;
+      }
+      expected = processChain(links, pid);
+    } else {
+      const links = yield { args: ["-axo", "pid=,ppid="], timeout };
+      expected = processChain(parseTable(links, parseLink), pid);
+    }
     if (!expected || expected.at(-1)?.pid !== 1) return undefined;
     args = [
       "-p",

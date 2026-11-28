@@ -5,6 +5,7 @@ import {
   resolveCurrentMuxContextAsync,
 } from "../src/multiplexer-current-context";
 import { resolveMux } from "../src/multiplexer";
+import { muxPsFixture } from "./mux-ps-fixture";
 
 const { sync, exec } = vi.hoisted(() => ({
   sync: vi.fn(),
@@ -31,12 +32,13 @@ const modes = ["sync", "async"] as const;
 
 function respond(command: string, args: readonly string[]): string {
   if (command === "ps") {
-    return (
+    return muxPsFixture(
       "1 0 ? /sbin/init\n" +
-      "2 1 ? tmux\n" +
-      "3 2 ? zellij\n" +
-      "4 3 pts/1 sh\n" +
-      `${process.pid} 4 pts/1 node\n`
+        "2 1 ? tmux\n" +
+        "3 2 ? zellij\n" +
+        "4 3 pts/1 sh\n" +
+        `${process.pid} 4 pts/1 node\n`,
+      args,
     );
   }
   if (command === "tmux" && args.includes("display-message")) {
@@ -83,7 +85,7 @@ describe.each(modes)("%s Zellij ownership", (mode) => {
       expect(result.kind).toBe("unavailable");
       expect(
         (mode === "sync" ? sync : exec).mock.calls.map(([command]) => command),
-      ).toEqual(["ps", "zellij"]);
+      ).toEqual(["ps", "ps", "ps", "ps", "ps", "ps", "zellij"]);
     },
   );
 
