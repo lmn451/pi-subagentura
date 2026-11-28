@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFile, execFileSync } from "node:child_process";
 import { resolveCurrentMuxContextAsync } from "../src/multiplexer-current-context";
 import { readProcessContextAsync } from "../src/multiplexer-process-context";
+import { muxPsFixture } from "./mux-ps-fixture";
 
 vi.mock("node:child_process", () => ({
   execFile: vi.fn(),
@@ -46,27 +47,34 @@ describe("asynchronous current mux discovery", () => {
     await expect(result).resolves.toMatchObject({ pid: process.pid });
   });
 
-  it("probes inherited backends concurrently without synchronous execution", async () => {
-    const result = resolveCurrentMuxContextAsync(env);
-    pending.shift()!.reply(null, table, "");
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(pending.map(({ file }) => file).sort()).toEqual(["herdr", "tmux"]);
-    const tmux = pending.find(({ file }) => file === "tmux")!;
-    const herdr = pending.find(({ file }) => file === "herdr")!;
-    tmux.reply(null, "%4\t101\t/dev/pts/2\n", "");
-    let settled = false;
-    void result.then(() => {
-      settled = true;
-    });
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(settled).toBe(false);
-    herdr.reply(new Error("timeout"), "", "");
-    await expect(result).resolves.toMatchObject({
-      kind: "ready",
-      target: { mux: "tmux", paneId: "%4" },
-    });
-    expect(execFileSync).not.toHaveBeenCalled();
-  });
+  it.each(["darwin", "linux"] as const)(
+    "probes inherited backends concurrently without synchronous execution on %s",
+    async (platform) => {
+      vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+      const result = resolveCurrentMuxContextAsync(env);
+      while (pending[0]?.file === "ps") {
+        const { args, reply } = pending.shift()!;
+        reply(null, muxPsFixture(table, args), "");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(pending.map(({ file }) => file).sort()).toEqual(["herdr", "tmux"]);
+      const tmux = pending.find(({ file }) => file === "tmux")!;
+      const herdr = pending.find(({ file }) => file === "herdr")!;
+      tmux.reply(null, "%4\t101\t/dev/pts/2\n", "");
+      let settled = false;
+      void result.then(() => {
+        settled = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      herdr.reply(new Error("timeout"), "", "");
+      await expect(result).resolves.toMatchObject({
+        kind: "ready",
+        target: { mux: "tmux", paneId: "%4" },
+      });
+      expect(execFileSync).not.toHaveBeenCalled();
+    },
+  );
 
   it("has the same fail-closed behavior for failed or malformed process reads", async () => {
     const failed = resolveCurrentMuxContextAsync(env);
