@@ -229,6 +229,11 @@ function nativeDecision(
   const childId = input.candidates.find(
     (candidate) => candidate.token === parsed.choice,
   )?.childId;
+  if (input.assessSplit) {
+    const reason = routingEvidenceFailureReason(parsed.evidence, config.policy);
+    if (reason)
+      return { kind: "split_uncertain", reason, evidence: parsed.evidence };
+  }
   return decideFromRoutingChoice(
     childId ?? parsed.choice,
     input.candidates.map((candidate) => candidate.childId),

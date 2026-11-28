@@ -264,14 +264,19 @@ describe("orchestrator routing advisor", () => {
         } as never);
       }
 
+      modelRegistry.classify.mockResolvedValue(
+        classifierResult("none", { split: 0.01, none: 0.99 }),
+      );
       const result = await execute(entries, true);
 
-      expect(result.details.decision).toEqual(
+      expect(result.details.decision).toMatchObject(
         state === "missing runtime" || state === "unknown liveness"
           ? { kind: "error", reason: "incomplete_registry" }
           : { kind: "no_match", reason: "new_child_recommended" },
       );
-      expect(modelRegistry.classify).not.toHaveBeenCalled();
+      expect(modelRegistry.classify).toHaveBeenCalledTimes(
+        result.details.decision.kind === "error" ? 0 : 1,
+      );
     });
 
     it("invalidates an empty projection when authority changes during its probe", async () => {
@@ -313,7 +318,9 @@ describe("orchestrator routing advisor", () => {
         answer.resolve(
           classifierResult(
             "none",
-            part ? { candidate_0: 0.1, none: 0.9 } : { split: 0.1, none: 0.9 },
+            part
+              ? { candidate_0: 0.05, split: 0.05, none: 0.9 }
+              : { split: 0.1, none: 0.9 },
           ),
         );
 
@@ -328,7 +335,7 @@ describe("orchestrator routing advisor", () => {
       const { execute, modelRegistry, scope } = startRoute();
       scope.interactiveStates.set(CHILD_A, runtimeState(CHILD_A, scope));
       modelRegistry.classify.mockResolvedValue(
-        classifierResult("none", { candidate_0: 0.1, none: 0.9 }),
+        classifierResult("none", { candidate_0: 0.05, split: 0.05, none: 0.9 }),
       );
 
       const result = await execute(

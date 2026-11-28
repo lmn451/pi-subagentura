@@ -27,6 +27,8 @@ To opt into reusable workflow orchestration, start Pi with the workflow-oriented
 `/workflow`). General tasks are not routed to the workflow tool automatically
 when no workflow mode is selected and the user has not asked for one.
 
+See [request flows by mode](FLOWS.md) to compare delegation, split decisions, handoffs, and completion.
+
 ## Demo
 
 [![Watch the pi-subagentura workflow demo (8:06)](https://subagentura.tech/media/pi-subagentura/workflow-poster.webp)](https://subagentura.tech/pi-subagentura/#workflow-video)
