@@ -2590,6 +2590,8 @@ export function updatePersistedTelemetrySession(
     } else {
       throw stateLoadError(cwd, result);
     }
+    // The shared file has one correlation slot. Only its owner can replace or clear it.
+    if (current.telemetry && current.parent !== parentSessionId) return;
     current.parent = parentSessionId;
     current.telemetry = telemetry;
     writeInteractiveStatesUnlocked(cwd, current);
@@ -2653,7 +2655,8 @@ export function removeInteractiveStatesForParent(
   cwd: string,
   parentSessionId: string | undefined,
 ): void {
-  if (!parentSessionId) return;
+  // Taking the lock creates .pi/. There is nothing to retire without a state file.
+  if (!parentSessionId || !existsSync(stateFilePath(cwd))) return;
   withInteractiveStateLock(cwd, () => {
     const result = loadInteractiveStatesResult(cwd);
     if (result.kind === "missing") return;
