@@ -81,6 +81,7 @@
     "src/completion-manifest.ts",
     "src/completion-ledger.ts",
     "src/helpers.ts",
+    "src/job-settlement.ts",
     "src/usage.ts",
     "src/orchestrator-routing.ts",
     "src/routing-engine.ts",

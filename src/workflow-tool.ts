@@ -71,7 +71,7 @@ import {
   type SessionOwnerToken,
   type SessionScope,
 } from "./session-scope";
-import { attachAsyncJobSettlement } from "./tools/in-process";
+import { attachAsyncJobSettlement } from "./job-settlement";
 import { registerToolWithDefaultGuidance } from "./tool-guidance";
 import { registerCommandWithTelemetry } from "./telemetry-operations";
 import {
