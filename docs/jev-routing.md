@@ -288,8 +288,10 @@ against a child whose confirmed responsibility is read-only parser review.
 Do not include the worker message or use `task` or `part` in this mode.
 If the scope cannot be described safely, do not call the classifier.
 
-Only the selected eligible child is offered, without discovery aliases. The
-result has `status: scope_advice`. `fit` means the description fits; `mismatch`
+Only the selected eligible child is offered, without discovery aliases.
+Classifier-bound free text, including task descriptions and generated criteria,
+is scrubbed of known eligible sibling IDs. The IDs are not added as a list.
+The result has `status: scope_advice`. `fit` means the description fits; `mismatch`
 means it does not; `uncertain` means the evidence is insufficient. Errors and
 cancellation are not judgments about fit. This opt-in check is separate from
 owner selection, never runs automatically on send, and cannot change a child's

@@ -315,9 +315,16 @@ async function resolveOrchestratorRoute(params: {
     return routingAdviceResult(errorDecision("state_changed"));
   }
   const trustedIds = initialAuthority.childIds;
+  const target = params.params.scopeCheckChildId;
+  const targetIsUncertain =
+    target !== undefined &&
+    hasUncertainRoutingOwner(initialView, [target], scope, owner, sessionId);
   if (
-    registryIncomplete(initialView, trustedIds, scope, owner, sessionId) ||
-    (initialCandidates.length === 0 &&
+    (target === undefined &&
+      registryIncomplete(initialView, trustedIds, scope, owner, sessionId)) ||
+    targetIsUncertain ||
+    (target === undefined &&
+      initialCandidates.length === 0 &&
       hasUncertainRoutingOwner(
         initialView,
         trustedIds,
@@ -328,7 +335,6 @@ async function resolveOrchestratorRoute(params: {
   ) {
     return routingAdviceResult(errorDecision("incomplete_registry"));
   }
-  const target = params.params.scopeCheckChildId;
   const offered =
     target === undefined
       ? initialCandidates
@@ -352,15 +358,30 @@ async function resolveOrchestratorRoute(params: {
     runtime: entry.runtime,
     view: entry.view,
   }));
+  const siblingIds =
+    target === undefined
+      ? []
+      : initialCandidates
+          .map(({ candidate }) => candidate.childId)
+          .filter((childId) => childId !== target)
+          .sort(
+            (left, right) =>
+              right.length - left.length || left.localeCompare(right),
+          );
+  const redactSiblingIds = (value: string) =>
+    siblingIds.reduce(
+      (text, childId) => text.split(childId).join("[sibling]"),
+      value,
+    );
   const input = {
     ...(assessSplit ? { assessSplit } : {}),
-    task: description,
+    task: target === undefined ? description : redactSiblingIds(description),
     candidates: offered.map(({ candidate }) =>
       target === undefined
         ? candidate
         : {
             childId: candidate.childId,
-            description: candidate.description,
+            description: redactSiblingIds(candidate.description),
             status: candidate.status,
           },
     ),
@@ -447,19 +468,38 @@ async function resolveOrchestratorRoute(params: {
   if (
     !authorityUnchanged ||
     !snapshotsMatchCurrentView(
-      snapshots,
+      target === undefined
+        ? snapshots
+        : snapshots.filter(({ candidate }) => candidate.childId === target),
       currentView,
       trustedIds,
       scope,
       owner,
       sessionId,
+      target !== undefined,
     )
   ) {
     return routingAdviceResult(errorDecision("state_changed"));
   }
+  // Recheck live in-memory status after sibling probes yield.
+  if (target !== undefined) {
+    const targetState = scope.interactiveStates.get(target);
+    const targetSnapshot = snapshots.find(
+      ({ candidate }) => candidate.childId === target,
+    );
+    if (
+      !targetState ||
+      targetState !== targetSnapshot?.state ||
+      (targetState.status !== "running" && targetState.status !== "idle") ||
+      !isStandaloneRoutingRuntime(targetState, owner, sessionId)
+    ) {
+      return routingAdviceResult(errorDecision("state_changed"));
+    }
+  }
   if (
     decision.kind === "no_match" &&
     decision.reason === "new_child_recommended" &&
+    target === undefined &&
     hasUncertainRoutingOwner(currentView, trustedIds, scope, owner, sessionId)
   ) {
     return routingAdviceResult(errorDecision("incomplete_registry"));
@@ -694,11 +734,22 @@ function snapshotsMatchCurrentView(
   scope: SessionScope,
   owner: ReturnType<typeof sessionOwner>,
   sessionId: string | undefined,
+  selectedChildScope: boolean,
 ): boolean {
-  if (registryIncomplete(currentView, trustedIds, scope, owner, sessionId)) {
+  if (
+    !selectedChildScope &&
+    registryIncomplete(currentView, trustedIds, scope, owner, sessionId)
+  ) {
     return false;
   }
-  const current = eligibleCandidates(currentView, scope, owner, sessionId);
+  const allCurrent = eligibleCandidates(currentView, scope, owner, sessionId);
+  const current = selectedChildScope
+    ? allCurrent.filter(({ candidate }) =>
+        snapshots.some(
+          (snapshot) => snapshot.candidate.childId === candidate.childId,
+        ),
+      )
+    : allCurrent;
   if (current.length !== snapshots.length) return false;
   const currentById = new Map(
     current.map((snapshot) => [snapshot.candidate.childId, snapshot]),

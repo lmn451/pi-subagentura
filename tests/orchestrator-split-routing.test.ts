@@ -526,6 +526,84 @@ describe("explicit handoff scope check", () => {
     },
   );
 
+  it("redacts eligible sibling IDs from scope-check classifier text", async () => {
+    const s = await setup("optional", false);
+    addOwner(s, apiId, `Review ${releaseId} API work`);
+    addOwner(s, releaseId, "Publish packages");
+    addOwner(s, "abcdef12", "Short sibling");
+    addOwner(s, "abcdef1234567890", "Long sibling");
+    s.modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult("candidate_0", { candidate_0: 0.96, none: 0.04 }),
+    );
+
+    const result = await s.call(advisor, {
+      scopeCheckChildId: apiId,
+      routingDescription: `Review ${releaseId}; task abcdef1234567890; criteria ${releaseId}`,
+    });
+
+    expect(result.details).toMatchObject({ decision: { kind: "fit" } });
+    const payload = JSON.stringify(s.modelRegistry.classify.mock.calls[0][1]);
+    expect(payload).not.toContain(releaseId);
+    expect(payload).not.toContain("abcdef12");
+    expect(payload).not.toContain(apiId);
+    expect(choices(s.modelRegistry)).toEqual(["candidate_0", "none"]);
+  });
+
+  it("does not fail selected-child scope advice for unrelated incomplete siblings", async () => {
+    const s = await setup("optional", false);
+    addOwner(s, apiId, "Review API");
+    addOwner(s, releaseId, "Publish packages");
+    s.scope.interactiveStates.delete(releaseId);
+    s.modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult("none", { candidate_0: 0.01, none: 0.99 }),
+    );
+
+    const result = await s.call(advisor, {
+      scopeCheckChildId: apiId,
+      routingDescription: apiWork,
+    });
+
+    expect(result.details).toMatchObject({ decision: { kind: "mismatch" } });
+  });
+  it("rechecks the selected target after the sibling's final probe", async () => {
+    const s = await setup("optional", false);
+    addOwner(s, apiId, "Review API");
+    addOwner(s, releaseId, "Other work");
+    const siblingProbeStarted = Promise.withResolvers<void>();
+    const releaseSiblingProbe = Promise.withResolvers<"alive">();
+    let siblingProbeCount = 0;
+    __setTmuxMultiplexer({
+      getPaneLivenessAsync: async (paneId: string) => {
+        if (paneId === `%${releaseId}` && ++siblingProbeCount === 2) {
+          siblingProbeStarted.resolve();
+          return releaseSiblingProbe.promise;
+        }
+        return "alive";
+      },
+    } as never);
+    s.modelRegistry.classify.mockResolvedValueOnce(
+      classifierResult("candidate_0", {
+        candidate_0: 0.96,
+        none: 0.04,
+      }),
+    );
+    const pending = s.call(advisor, {
+      scopeCheckChildId: apiId,
+      routingDescription: apiWork,
+    });
+    await siblingProbeStarted.promise;
+    await new Promise((resolve) => setImmediate(resolve));
+    s.scope.interactiveStates.get(apiId)!.status = "cancelled";
+    releaseSiblingProbe.resolve("alive");
+
+    expect((await pending).details.decision).toEqual({
+      kind: "error",
+      reason: "state_changed",
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
   it("rejects unknown targets, legacy input, and part routing without a classifier call", async () => {
     const s = await setup("optional", false);
     addOwner(s, apiId, "Read-only review");
