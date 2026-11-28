@@ -6,7 +6,7 @@ import {
 } from "../src/system-one-choice.ts";
 import { routingEvidenceFailureReason } from "../src/routing-engine.ts";
 
-const pilot = [
+export const pilot = [
   ["none", "Correct a CSV quoting bug and add its regression test."],
   [
     "split",
@@ -50,7 +50,7 @@ const pilot = [
     "Translate the welcome screen into French and estimate backup storage costs for the next quarter.",
   ],
 ];
-const fresh = [
+export const fresh = [
   [
     "none",
     "Repair the search index and demonstrate the repair with a failing-then-passing lookup.",
@@ -123,52 +123,75 @@ function payload(task, variant) {
   return context;
 }
 
-const [mode, dataset, ...extra] = process.argv.slice(2);
-if (
-  !["--live", "--dry-run"].includes(mode) ||
-  !["pilot", "fresh"].includes(dataset) ||
-  extra.length
-) {
-  throw new Error(
-    "Usage: bun scripts/eval-jev-split.mjs (--dry-run|--live) (pilot|fresh)",
-  );
+export function buildSchedule(cases, variants) {
+  const labelTotals = new Map();
+  for (const [label] of cases) {
+    labelTotals.set(label, (labelTotals.get(label) ?? 0) + 1);
+  }
+  const labelCounts = new Map();
+  return cases.flatMap(([label, task], index) => {
+    const labelIndex = labelCounts.get(label) ?? 0;
+    labelCounts.set(label, labelIndex + 1);
+    const midpoint = (labelTotals.get(label) ?? 0) / 2;
+    const order = labelIndex < midpoint ? variants : [...variants].reverse();
+    return order.map((variant) => ({
+      case: index + 1,
+      label,
+      task,
+      variant,
+    }));
+  });
 }
-const cases = dataset === "pilot" ? pilot : fresh;
-const modelId = "jev-latest";
-const variants = ["current", dataset === "pilot" ? "pilot" : "refined"];
-if (mode === "--dry-run") {
-  console.log(
-    JSON.stringify({
-      dataset,
-      modelId,
-      variants,
-      cases,
-      maxRequests: 2 * cases.length,
-    }),
+
+async function main() {
+  const [mode, dataset, ...extra] = process.argv.slice(2);
+  if (
+    !["--live", "--dry-run"].includes(mode) ||
+    !["pilot", "fresh"].includes(dataset) ||
+    extra.length
+  ) {
+    throw new Error(
+      "Usage: bun scripts/eval-jev-split.mjs (--dry-run|--live) (pilot|fresh)",
+    );
+  }
+  const cases = dataset === "pilot" ? pilot : fresh;
+  const modelId = "jev-latest";
+  const variants = ["current", dataset === "pilot" ? "pilot" : "refined"];
+  const schedule = buildSchedule(cases, variants);
+  if (mode === "--dry-run") {
+    console.log(
+      JSON.stringify({
+        dataset,
+        modelId,
+        variants,
+        cases,
+        schedule,
+        maxRequests: schedule.length,
+      }),
+    );
+    return;
+  }
+  const apiKey = process.env.TYPESAFE_API_KEY;
+  if (!apiKey)
+    throw new Error("Set TYPESAFE_API_KEY to run the live comparison.");
+  const models = builtinModels();
+  const model = models.getModelOfType("classifier", "typesafe", modelId);
+  if (!model)
+    throw new Error("Classifier is not in the installed SDK catalog.");
+  const scores = Object.fromEntries(
+    variants.map((v) => [
+      v,
+      {
+        correctSingle: 0,
+        correctSplit: 0,
+        unnecessary: 0,
+        missed: 0,
+        abstain: 0,
+        error: 0,
+      },
+    ]),
   );
-  process.exit(0);
-}
-const apiKey = process.env.TYPESAFE_API_KEY;
-if (!apiKey)
-  throw new Error("Set TYPESAFE_API_KEY to run the live comparison.");
-const models = builtinModels();
-const model = models.getModelOfType("classifier", "typesafe", modelId);
-if (!model) throw new Error("Classifier is not in the installed SDK catalog.");
-const scores = Object.fromEntries(
-  variants.map((v) => [
-    v,
-    {
-      correctSingle: 0,
-      correctSplit: 0,
-      unnecessary: 0,
-      missed: 0,
-      abstain: 0,
-      error: 0,
-    },
-  ]),
-);
-for (const [index, [label, task]] of cases.entries()) {
-  for (const variant of index % 2 ? [...variants].reverse() : variants) {
+  for (const { case: caseNumber, label, task, variant } of schedule) {
     const result = await models.classify(model, payload(task, variant), {
       apiKey,
       signal: AbortSignal.timeout(3000),
@@ -190,7 +213,7 @@ for (const [index, [label, task]] of cases.entries()) {
     scores[variant][outcome]++;
     console.log(
       JSON.stringify({
-        case: index + 1,
+        case: caseNumber,
         label,
         variant,
         choice: answer?.choice,
@@ -198,7 +221,14 @@ for (const [index, [label, task]] of cases.entries()) {
       }),
     );
   }
+  console.log(JSON.stringify({ dataset, modelId, scores }, null, 2));
+  if (Object.values(scores).some((score) => score.error > 0))
+    process.exitCode = 1;
 }
-console.log(JSON.stringify({ dataset, modelId, scores }, null, 2));
-if (Object.values(scores).some((score) => score.error > 0))
-  process.exitCode = 1;
+
+if (import.meta.url === new URL(process.argv[1], "file:").href) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

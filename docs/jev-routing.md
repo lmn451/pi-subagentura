@@ -351,10 +351,23 @@ From a source checkout with development dependencies and Bun installed, run
 and labels without a provider call. To opt in to 24 potentially billable calls,
 set `TYPESAFE_API_KEY` and use `--live fresh`. Use `pilot` instead of `fresh`
 to repeat the initial comparison. Neither run is part of CI or the extension.
+The offline schedule regression test runs with
+`node --test tests/eval-jev-split-schedule.test.mjs`; it checks both datasets,
+the 3:3 first-variant balance in each label group, paired inputs, and the exact
+48-request total. It makes no provider calls.
 
 Each dataset has six single-handoff and six independent-deliverable tasks.
 Both variants use `typesafe/jev-latest`, the same request state and choice labels,
-and the default routing thresholds. Order alternates within each dataset.
+and the default routing thresholds. The revised procedure keeps each pair
+together and gives each label group three cases with current first, then three
+with comparison first. This schedule change affects only the evaluation script;
+production routing remains unchanged.
+
+The table below reports historical results collected under the previous
+globally alternating order. They are not results of the revised counterbalanced
+procedure and must not be relabeled or treated as a replication. No live run of
+the revised procedure is included here.
+
 Here, abstention means the evidence failed a threshold, not a claim about what
 the parent subsequently did. Errors are counted separately.
 
