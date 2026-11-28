@@ -24,7 +24,6 @@ import {
   getInProcessJob,
   MAX_REGISTRY_SIZE,
   removeInProcessJob,
-  inProcessJobOwner,
   inProcessJobsForOwner,
   pruneCompletedJobs,
   registerInProcessJob,
@@ -57,7 +56,6 @@ import {
   reserveCompletionGroup,
   releaseCompletionGroup,
   consumeCompletionSource,
-  publishCompletion,
   registerCompletionMember,
   resolveCompletionPolicy,
   type ResolvedCompletionPolicy,
@@ -84,6 +82,11 @@ import {
   createLaunchResolutionReporter,
   type TelemetryLaunchResolutionReporter,
 } from "../telemetry-launch";
+import {
+  attachAsyncJobSettlement,
+  publishInProcessCompletion,
+} from "../job-settlement";
+
 const IN_PROCESS_OUTPUT_PREVIEW_CHARS = 500;
 const InProcessUsageOutputSchema = Type.Object({
   input: Type.Number(),
@@ -452,24 +455,6 @@ function depthLimitResult(
   } as AgentToolResult<InProcessSubagentDetails>;
 }
 
-function createAsyncJobErrorResult(error: unknown): SubagentResult {
-  const message = error instanceof Error ? error.message : String(error);
-  return {
-    output: `Sub-agent crashed: ${message}`,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      cost: 0,
-      turns: 0,
-    },
-    model: undefined,
-    isError: true,
-    errorMessage: message,
-  };
-}
-
 function completionPolicyErrorResult(
   error: unknown,
 ): AgentToolResult<InProcessSubagentDetails> {
@@ -511,105 +496,6 @@ function formatResolvedCompletionBehavior(
   return completion.policy === "group"
     ? `Completion will notify the user immediately and resume the parent once group ${completion.groupId} is sealed at parent settlement and all registered members finish.`
     : "Completion will notify the user immediately and resume the parent with a compact result reference when safely idle.";
-}
-
-function publishInProcessCompletion(
-  jobState: JobState,
-  result: SubagentResult,
-  owner?: SessionOwnerToken,
-): void {
-  if (!jobState.completionPolicy || jobState.completionOwner === "workflow") {
-    return;
-  }
-  if (jobState.completionPublished) return;
-  publishCompletion(
-    {
-      schemaVersion: 1,
-      completionId: `job:${jobState.id}`,
-      source: "in-process",
-      sourceId: jobState.id,
-      label: `Job ${jobState.id}`,
-      status: result.cancelled
-        ? "cancelled"
-        : result.isError
-          ? "error"
-          : "done",
-      policy: jobState.completionPolicy,
-      ...(jobState.completionGroupId
-        ? { groupId: jobState.completionGroupId }
-        : {}),
-      references: result.cancelled
-        ? [{ label: "status", value: "cancelled; no result retained" }]
-        : [
-            {
-              label: "result",
-              value: `call get_subagent_result with jobId ${JSON.stringify(jobState.id)}`,
-            },
-          ],
-      completedAt: jobState.completedAt ?? Date.now(),
-    },
-    owner,
-  );
-  jobState.completionPublished = true;
-}
-
-function settleAsyncJob(
-  jobId: string,
-  jobState: JobState,
-  result: SubagentResult,
-  ctx: RunningFooterContext | undefined,
-): void {
-  jobState.completedAt ??= Date.now();
-  const owner = inProcessJobOwner(jobState);
-  if (jobState.status === "cancelled") {
-    publishInProcessCompletion(
-      jobState,
-      result.cancelled
-        ? result
-        : {
-            output: "",
-            usage: ZERO_USAGE,
-            isError: false,
-            cancelled: true,
-          },
-      owner,
-    );
-    return;
-  }
-  if (result.cancelled) {
-    jobState.status = "cancelled";
-    jobState.result = result;
-    publishInProcessCompletion(jobState, result, owner);
-    scheduleJobCleanup(jobId, true, undefined, owner);
-    if (ctx) updateRunningFooter(ctx, owner);
-    return;
-  }
-  jobState.status = result.isError ? "error" : "done";
-  jobState.result = result;
-  scheduleJobCleanup(jobId, false, jobState.maxAge, owner);
-
-  publishInProcessCompletion(jobState, result, owner);
-  // Workflow aggregates own completion publication for their child jobs.
-
-  if (ctx) updateRunningFooter(ctx, owner);
-}
-
-/**
- * Write the terminal status/result onto an async job when its promise settles.
- *
- * `ctx` is optional so non-tool spawn paths (workflow children) can reuse the
- * same settlement without owning a footer surface — the poller repaints anyway.
- */
-export function attachAsyncJobSettlement(
-  jobId: string,
-  jobState: JobState,
-  ctx?: RunningFooterContext,
-): void {
-  const settledPromise = jobState.promise.catch(createAsyncJobErrorResult);
-  jobState.promise = settledPromise;
-  void settledPromise.then((result) => {
-    settleAsyncJob(jobId, jobState, result, ctx);
-  });
 }
 
 async function runSubagent(
@@ -1023,7 +909,9 @@ function registerSubagentWithContextTool(
         }
         updateRunningFooter(ctx, owner);
 
-        attachAsyncJobSettlement(jobId, jobState, ctx);
+        attachAsyncJobSettlement(jobId, jobState, (owner) =>
+          updateRunningFooter(ctx, owner),
+        );
         if (!(start?.() ?? false)) {
           resolveFailedLaunch("parent_shutdown", "cancelled");
           removeInProcessJob(jobId, owner);
@@ -1419,7 +1307,9 @@ function registerSubagentIsolatedTool(
         }
         updateRunningFooter(ctx, owner);
 
-        attachAsyncJobSettlement(jobId, jobState, ctx);
+        attachAsyncJobSettlement(jobId, jobState, (owner) =>
+          updateRunningFooter(ctx, owner),
+        );
         if (!(start?.() ?? false)) {
           resolveFailedLaunch("parent_shutdown", "cancelled");
           removeInProcessJob(jobId, owner);
