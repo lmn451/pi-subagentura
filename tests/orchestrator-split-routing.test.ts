@@ -492,3 +492,51 @@ it.each(["optional", "forced"] as const)(
     expect(launch).not.toHaveBeenCalled();
   },
 );
+
+describe("explicit handoff scope check", () => {
+  it.each([
+    ["candidate_0", 0.96, "fit"],
+    ["none", 0.96, "mismatch"],
+    ["none", 0.51, "uncertain"],
+  ] as const)(
+    "maps %s at %s to %s without dispatch",
+    async (choice, p, kind) => {
+      const s = await setup("optional");
+      addOwner(s, apiId, "Review the API, read-only");
+      addOwner(s, releaseId, "Publish release packages");
+      s.modelRegistry.classify.mockResolvedValueOnce(
+        classifierResult(choice, {
+          candidate_0: choice === "candidate_0" ? p : 1 - p,
+          none: choice === "none" ? p : 1 - p,
+        }),
+      );
+      const result = await s.call(advisor, {
+        scopeCheckChildId: apiId,
+        routingDescription: apiWork,
+      });
+      expect(result.details).toMatchObject({
+        status: "scope_advice",
+        decision: { kind },
+      });
+      expect(choices(s.modelRegistry)).toEqual(["candidate_0", "none"]);
+      const serialized = expectSafePayload(s, 0, apiWork);
+      expect(serialized).not.toContain("Publish release packages");
+      expect(send).not.toHaveBeenCalled();
+      expect(launch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects unknown targets, legacy input, and part routing without a classifier call", async () => {
+    const s = await setup("optional", false);
+    addOwner(s, apiId, "Read-only review");
+    for (const params of [
+      { scopeCheckChildId: releaseId, routingDescription: apiWork },
+      { scopeCheckChildId: apiId, task: apiMaterial },
+      { scopeCheckChildId: apiId, routingDescription: apiWork, part: true },
+    ])
+      expect((await s.call(advisor, params)).details.decision.kind).toBe(
+        "error",
+      );
+    expect(s.modelRegistry.classify).not.toHaveBeenCalled();
+  });
+});

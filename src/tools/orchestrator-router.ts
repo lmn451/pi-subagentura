@@ -40,6 +40,13 @@ export const MAX_ORCHESTRATOR_ROUTE_TASK_BYTES = 16 * 1024;
 const MAX_ORCHESTRATOR_ROUTE_TASK_CHARS = 16 * 1024;
 
 const ResolveOrchestratorRouteParams = Type.Object({
+  scopeCheckChildId: Type.Optional(
+    Type.String({
+      pattern: "^(?:[a-f0-9]{8}|[a-f0-9]{16})$",
+      description:
+        "Optional separate scope check for a selected child, not owner selection. Supply only this ID and a minimal safe routingDescription. Does not authorize or send work.",
+    }),
+  ),
   part: Type.Optional(
     Type.Boolean({
       description: "Set true only for one independent part after split_needed.",
@@ -64,6 +71,7 @@ const ResolveOrchestratorRouteParams = Type.Object({
 });
 
 interface RouteInput {
+  scopeCheckChildId?: string;
   routingDescription?: string;
   task?: string;
   part?: boolean;
@@ -76,6 +84,15 @@ function readRoutingDescription(
   if (!input || (input.part !== undefined && typeof input.part !== "boolean")) {
     return undefined;
   }
+  if (
+    input.scopeCheckChildId !== undefined &&
+    (typeof input.scopeCheckChildId !== "string" ||
+      !/^(?:[a-f0-9]{8}|[a-f0-9]{16})$/.test(input.scopeCheckChildId) ||
+      Object.keys(input).some(
+        (key) => key !== "scopeCheckChildId" && key !== "routingDescription",
+      ))
+  )
+    return undefined;
   if (input.task === undefined) return input.routingDescription;
   if (
     !legacyAllowed ||
@@ -192,7 +209,11 @@ export function registerOrchestratorRouterTool(
           ? createNativeEngine
           : (options.createEngine ?? createNativeEngine),
       });
-      return { ...result, ...(usage ? { usage } : {}) };
+      const advice =
+        params?.scopeCheckChildId === undefined
+          ? result
+          : scopeAdviceResult(result.details.decision);
+      return { ...advice, ...(usage ? { usage } : {}) };
     },
   });
   return true;
@@ -307,7 +328,17 @@ async function resolveOrchestratorRoute(params: {
   ) {
     return routingAdviceResult(errorDecision("incomplete_registry"));
   }
-  const assessSplit = split && params.params.part !== true;
+  const target = params.params.scopeCheckChildId;
+  const offered =
+    target === undefined
+      ? initialCandidates
+      : initialCandidates.filter(
+          ({ candidate }) => candidate.childId === target,
+        );
+  if (target !== undefined && !offered.length)
+    return routingAdviceResult(errorDecision("unavailable"));
+  const assessSplit =
+    target === undefined && split && params.params.part !== true;
   if (initialCandidates.length === 0 && !assessSplit) {
     return routingAdviceResult({
       kind: "no_match",
@@ -324,7 +355,15 @@ async function resolveOrchestratorRoute(params: {
   const input = {
     ...(assessSplit ? { assessSplit } : {}),
     task: description,
-    candidates: snapshots.map(({ candidate }) => candidate),
+    candidates: offered.map(({ candidate }) =>
+      target === undefined
+        ? candidate
+        : {
+            childId: candidate.childId,
+            description: candidate.description,
+            status: candidate.status,
+          },
+    ),
   };
 
   let engineDecision: unknown;
@@ -354,7 +393,7 @@ async function resolveOrchestratorRoute(params: {
     return routingAdviceResult({ kind: "cancelled" });
   }
 
-  decision = sanitizeDecision(engineDecision, snapshots, assessSplit);
+  decision = sanitizeDecision(engineDecision, offered, assessSplit);
   if (decision.kind === "cancelled") {
     return routingAdviceResult(decision);
   }
@@ -427,6 +466,28 @@ async function resolveOrchestratorRoute(params: {
   }
 
   return routingAdviceResult(decision);
+}
+
+/** Scope checks never return a route, a creation recommendation, or dispatch authority. */
+function scopeAdviceResult(decision: RoutingDecision) {
+  const outcome =
+    decision.kind === "match"
+      ? { kind: "fit" }
+      : decision.kind === "no_match"
+        ? {
+            kind:
+              decision.reason === "new_child_recommended" && decision.evidence
+                ? "mismatch"
+                : "uncertain",
+          }
+        : decision.kind === "cancelled" || decision.kind === "error"
+          ? decision
+          : errorDecision("invalid_response");
+  const text = `Handoff scope check: ${JSON.stringify(outcome)}. Advice only; no authorization or dispatch.`;
+  return {
+    content: [{ type: "text" as const, text }],
+    details: { status: "scope_advice" as const, decision: outcome },
+  };
 }
 
 function routingAuthoritySnapshot(
