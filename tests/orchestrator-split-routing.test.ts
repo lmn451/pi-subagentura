@@ -565,6 +565,20 @@ describe("explicit handoff scope check", () => {
 
     expect(result.details).toMatchObject({ decision: { kind: "mismatch" } });
   });
+  it("keeps scope advice when another child is registered during classification", async () => {
+    const s = await setup("optional", false);
+    addOwner(s, apiId, "Review API");
+    s.modelRegistry.classify.mockImplementationOnce(async () => {
+      addOwner(s, releaseId, "Publish packages");
+      return classifierResult("candidate_0", { candidate_0: 0.99, none: 0.01 });
+    });
+    const result = await s.call(advisor, {
+      scopeCheckChildId: apiId,
+      routingDescription: apiWork,
+    });
+    expect(result.details.decision).toMatchObject({ kind: "fit" });
+  });
+
   it("rechecks the selected target after the sibling's final probe", async () => {
     const s = await setup("optional", false);
     addOwner(s, apiId, "Review API");

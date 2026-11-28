@@ -266,12 +266,13 @@ async function resolveOrchestratorRoute(params: {
   const owner = sessionOwner(scope);
   const sessionId = sessionIdForScope(scope);
   const requestIdentity = latestUserRequestIdentity(params.ctx);
+  const target = params.params.scopeCheckChildId;
   const authorityEntries = parentBranchEntries(params.ctx);
   let initialAuthority: ReturnType<typeof routingAuthoritySnapshot>;
   let initialAuthorityUnchanged: boolean;
   let initialView: OrchestratorAgentRegistryView;
   try {
-    initialAuthority = routingAuthoritySnapshot(cwd, authorityEntries);
+    initialAuthority = routingAuthoritySnapshot(cwd, authorityEntries, target);
     initialView = await loadOrchestratorAgentRegistryView(
       cwd,
       scope.interactiveStates,
@@ -282,7 +283,8 @@ async function resolveOrchestratorRoute(params: {
     );
     initialAuthorityUnchanged =
       initialAuthority.digest ===
-      routingAuthoritySnapshot(cwd, parentBranchEntries(params.ctx)).digest;
+      routingAuthoritySnapshot(cwd, parentBranchEntries(params.ctx), target)
+        .digest;
   } catch {
     if (params.signal?.aborted) {
       return routingAdviceResult({ kind: "cancelled" });
@@ -315,7 +317,6 @@ async function resolveOrchestratorRoute(params: {
     return routingAdviceResult(errorDecision("state_changed"));
   }
   const trustedIds = initialAuthority.childIds;
-  const target = params.params.scopeCheckChildId;
   const targetIsUncertain =
     target !== undefined &&
     hasUncertainRoutingOwner(initialView, [target], scope, owner, sessionId);
@@ -428,7 +429,7 @@ async function resolveOrchestratorRoute(params: {
     const currentAuthorityEntries = parentBranchEntries(params.ctx);
     if (
       initialAuthority.digest !==
-      routingAuthoritySnapshot(cwd, currentAuthorityEntries).digest
+      routingAuthoritySnapshot(cwd, currentAuthorityEntries, target).digest
     ) {
       return routingAdviceResult(errorDecision("state_changed"));
     }
@@ -443,7 +444,8 @@ async function resolveOrchestratorRoute(params: {
     // Liveness probes yield; recheck the same authority after the projection.
     authorityUnchanged =
       initialAuthority.digest ===
-      routingAuthoritySnapshot(cwd, parentBranchEntries(params.ctx)).digest;
+      routingAuthoritySnapshot(cwd, parentBranchEntries(params.ctx), target)
+        .digest;
   } catch {
     if (params.signal?.aborted) {
       return routingAdviceResult({ kind: "cancelled" });
@@ -533,11 +535,12 @@ function scopeAdviceResult(decision: RoutingDecision) {
 function routingAuthoritySnapshot(
   cwd: string,
   authorityEntries: readonly unknown[],
+  target?: string,
 ): { digest: string; childIds: string[] } {
   const records = listOrchestratorRoutingAuthorityEntries(
     cwd,
     authorityEntries,
-  );
+  ).filter((record) => target === undefined || record.childId === target);
   records.sort((left, right) => left.childId.localeCompare(right.childId));
   return {
     digest: JSON.stringify(records),
