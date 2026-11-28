@@ -136,14 +136,21 @@ function contextCandidates(env: NodeJS.ProcessEnv): {
   return { names, targets };
 }
 
+function inspectionScope(targets: LiveMuxTarget[]) {
+  return targets.some((target) => target.mux === "herdr-core")
+    ? "ancestry"
+    : "all";
+}
+
 /** Resolve ownership, not focus or an inherited environment-marker priority. */
 export function resolveCurrentMuxContext(
   env: NodeJS.ProcessEnv = process.env,
 ): CurrentMuxContext {
   const { names, targets } = contextCandidates(env);
   if (names.length === 0) return { kind: "absent" };
-  const context = readProcessContext();
-  if (!context) return unavailableContext(names);
+  const context = readProcessContext(process.pid, inspectionScope(targets));
+  if (!context)
+    return unavailableContext(names, "process ancestry unavailable");
   return selectCurrentMuxContext(
     names,
     context,
@@ -158,8 +165,12 @@ export async function resolveCurrentMuxContextAsync(
   const observation = { ...env };
   const { names, targets } = contextCandidates(observation);
   if (names.length === 0) return { kind: "absent" };
-  const context = await readProcessContextAsync();
-  if (!context) return unavailableContext(names);
+  const context = await readProcessContextAsync(
+    process.pid,
+    inspectionScope(targets),
+  );
+  if (!context)
+    return unavailableContext(names, "process ancestry unavailable");
   const probes = await Promise.all(
     targets.map((target) =>
       probeLiveMuxTargetAsync(target, context, observation),
@@ -168,10 +179,13 @@ export async function resolveCurrentMuxContextAsync(
   return selectCurrentMuxContext(names, context, probes);
 }
 
-function unavailableContext(names: string[]): CurrentMuxContext {
+function unavailableContext(
+  names: string[],
+  reason: "process ancestry unavailable" | "host ownership not verified",
+): CurrentMuxContext {
   return {
     kind: "unavailable",
-    message: `${names.join("/")} context is unavailable or cannot be tied to this process; refusing to guess. Use an explicit mux preference to override.`,
+    message: `${names.join("/")} context is unavailable: ${reason}; refusing to guess. Use an explicit mux preference to override.`,
   };
 }
 
@@ -180,7 +194,7 @@ function selectCurrentMuxContext(
   context: ProcessContext,
   probes: LiveMuxProbe[],
 ): CurrentMuxContext {
-  const unavailable = unavailableContext(names);
+  const unavailable = unavailableContext(names, "host ownership not verified");
   const matches = probes
     .filter((probe) => probe.kind === "match")
     .sort((a, b) => a.distance - b.distance);
