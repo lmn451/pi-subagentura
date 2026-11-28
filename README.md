@@ -773,23 +773,23 @@ a per-(cwd) state file is written to `<cwd>/.pi/subagentura-state.json`.
 
 Standalone interactive registry state and panes behave across these lifecycle actions as follows:
 
-| Action                                            | State file                   | Panes                   | Rehydrated next start?                       |
-| ------------------------------------------------- | ---------------------------- | ----------------------- | -------------------------------------------- |
-| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept                         | Preserved               | ✅ Same session, parentSessionId matches     |
-| **Ctrl+D → fresh `pi` (no session)**              | Kept                         | Preserved               | ❌ Different session, no match               |
-| **`/reload`**                                     | Kept                         | Preserved               | ✅ Same session                              |
-| **`/resume`** (switch to another session)         | Kept                         | Preserved               | ✅ If parentSessionId matches                |
-| **`/new`**                                        | **Deleted***                 | Tracked panes targeted* | ❌ Clean slate                               |
-| **`/fork`**                                       | Kept (owned entries removed) | Tracked panes targeted  | ❌ Fresh fork does not rehydrate prior state |
+| Action                                            | State file                                               | Panes                   | Rehydrated next start?                       |
+| ------------------------------------------------- | -------------------------------------------------------- | ----------------------- | -------------------------------------------- |
+| **Ctrl+D (quit) → restart with `--session`/`-r`** | Kept                                                     | Preserved               | ✅ Same session, parentSessionId matches     |
+| **Ctrl+D → fresh `pi` (no session)**              | Kept                                                     | Preserved               | ❌ Different session, no match               |
+| **`/reload`**                                     | Kept                                                     | Preserved               | ✅ Same session                              |
+| **`/resume`** (switch to another session)         | Kept                                                     | Preserved               | ✅ If parentSessionId matches                |
+| **`/new`**                                        | Outgoing parent's rows retired; unrelated rows preserved | Tracked panes targeted* | ❌ Clean slate                               |
+| **`/fork`**                                       | Kept (owned entries removed)                             | Tracked panes targeted  | ❌ Fresh fork does not rehydrate prior state |
 
-> **Note:** `/new` deletes the whole state file when no other started session
-> scope remains. `/fork` removes entries owned by the old parent while preserving
-> unrelated entries. Both transitions can only stop panes known to active
-> in-memory registries; children hidden by an unreadable or unsupported state file
-> may remain alive. These are destructive transitions, not recovery steps. If you
-> do `/new` and then `/resume` the old session, its deleted records will not
-> reappear. `/reload` or restarting with the same session can preserve and
-> rehydrate only state supported by the loaded version.
+> **Note:** `/new` and `/fork` retire only rows owned by the outgoing parent under
+> the state-file lock, preserving unrelated rows and shared routing metadata.
+> Both transitions can only stop panes known to active in-memory registries;
+> children hidden by an unreadable or unsupported state file may remain alive.
+> These are destructive transitions, not recovery steps. If you do `/new` and
+> then `/resume` the old session, its retired records will not reappear. `/reload`
+> or restarting with the same session can preserve and rehydrate only state
+> supported by the loaded version.
 
 On `/reload` and `/resume`, the `session_start` handler rehydrates
 the in-memory registry, filtering by `parentSessionId` so only subagents
