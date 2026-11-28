@@ -343,3 +343,29 @@ Evaluate labeled requests before tuning thresholds, including overlapping
 responsibilities, read-only versus implementation tasks, no suitable child,
 explicit-new/attach requests, and unclear scope. Keep sensitive evaluation tasks
 local unless external processing is separately approved.
+
+### Split wording with no eligible children
+
+From a source checkout with development dependencies and Bun installed, run
+`bun scripts/eval-jev-split.mjs --dry-run fresh` to inspect the synthetic tasks
+and labels without a provider call. To opt in to 24 potentially billable calls,
+set `TYPESAFE_API_KEY` and use `--live fresh`. Use `pilot` instead of `fresh`
+to repeat the initial comparison. Neither run is part of CI or the extension.
+
+Each dataset has six single-handoff and six independent-deliverable tasks.
+Both variants use `typesafe/jev-latest`, the same request state and choice labels,
+and the default routing thresholds. Order alternates within each dataset.
+Here, abstention means the evidence failed a threshold, not a claim about what
+the parent subsequently did. Errors are counted separately.
+
+| Dataset | Wording                          | Correct single | Correct split | Wrong above threshold | Abstained | Errors |
+| ------- | -------------------------------- | -------------: | ------------: | --------------------: | --------: | -----: |
+| Pilot   | Current                          |              5 |             0 |                     0 |         7 |      0 |
+| Pilot   | Split only                       |              3 |             6 |                     0 |         3 |      0 |
+| Fresh   | Current                          |              5 |             0 |                     0 |         7 |      0 |
+| Fresh   | Refined single-handoff criterion |              1 |             6 |                     0 |         5 |      0 |
+
+The refined prompt recognized all six independent pairs on the fresh set, but
+cleared the thresholds for only one of six single handoffs. Keep production
+wording unchanged. These are small synthetic samples, not accuracy estimates;
+the `jev-latest` alias can also change between runs.
